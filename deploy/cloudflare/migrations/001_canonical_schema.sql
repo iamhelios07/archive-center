@@ -44,10 +44,10 @@ CREATE TABLE IF NOT EXISTS "chat_logs" (
     "turn_index" INTEGER NOT NULL,
     "role" TEXT NOT NULL,
     "content" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "turn_index", "role")
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "chat_logs" ("chat_session_id", "turn_index");
+CREATE INDEX IF NOT EXISTS "chat_logs_idx_session_turn" ON "chat_logs" ("chat_session_id", "turn_index");
 CREATE INDEX IF NOT EXISTS "idx_session_role" ON "chat_logs" ("chat_session_id", "role");
 
 -- effective_input_logs
@@ -56,10 +56,10 @@ CREATE TABLE IF NOT EXISTS "effective_input_logs" (
     "chat_session_id" TEXT NOT NULL,
     "turn_index" INTEGER NOT NULL,
     "effective_input" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "effective_input_logs" ("chat_session_id", "turn_index");
-CREATE INDEX IF NOT EXISTS "idx_session" ON "effective_input_logs" ("chat_session_id");
+CREATE INDEX IF NOT EXISTS "effective_input_logs_idx_session_turn" ON "effective_input_logs" ("chat_session_id", "turn_index");
+CREATE INDEX IF NOT EXISTS "effective_input_logs_idx_session" ON "effective_input_logs" ("chat_session_id");
 
 -- memories
 CREATE TABLE IF NOT EXISTS "memories" (
@@ -76,9 +76,9 @@ CREATE TABLE IF NOT EXISTS "memories" (
     "narrative_significance" REAL,
     "place_wing" TEXT,
     "place_room" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "memories" ("chat_session_id", "turn_index");
+CREATE INDEX IF NOT EXISTS "memories_idx_session_turn" ON "memories" ("chat_session_id", "turn_index");
 CREATE INDEX IF NOT EXISTS "idx_importance" ON "memories" ("chat_session_id", "importance");
 CREATE INDEX IF NOT EXISTS "idx_wing_room" ON "memories" ("chat_session_id", "place_wing", "place_room");
 
@@ -101,9 +101,9 @@ CREATE TABLE IF NOT EXISTS "direct_evidence_records" (
     "repair_needed" INTEGER NOT NULL DEFAULT 0,
     "tombstoned" INTEGER NOT NULL DEFAULT 0,
     "superseded_by_id" INTEGER NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_state" ON "direct_evidence_records" ("chat_session_id", "archive_state");
+CREATE INDEX IF NOT EXISTS "direct_evidence_records_idx_session_state" ON "direct_evidence_records" ("chat_session_id", "archive_state");
 CREATE INDEX IF NOT EXISTS "idx_session_kind" ON "direct_evidence_records" ("chat_session_id", "evidence_kind");
 CREATE INDEX IF NOT EXISTS "idx_source_turn" ON "direct_evidence_records" ("chat_session_id", "source_turn_start", "source_turn_end");
 
@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS "kg_triples" (
     "valid_from" INTEGER NULL,
     "valid_to" INTEGER NULL,
     "source_turn" INTEGER NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_session_spo" ON "kg_triples" ("chat_session_id", "subject", "predicate", "object");
 CREATE INDEX IF NOT EXISTS "idx_valid" ON "kg_triples" ("chat_session_id", "valid_from", "valid_to");
@@ -125,7 +125,7 @@ CREATE INDEX IF NOT EXISTS "idx_valid" ON "kg_triples" ("chat_session_id", "vali
 -- audit_logs
 CREATE TABLE IF NOT EXISTS "audit_logs" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "event_type" TEXT NOT NULL,
     "chat_session_id" TEXT NULL,
     "target_type" TEXT NULL,
@@ -134,14 +134,14 @@ CREATE TABLE IF NOT EXISTS "audit_logs" (
     "details_json" TEXT,
     "source" TEXT DEFAULT 'api'
 );
-CREATE INDEX IF NOT EXISTS "idx_created" ON "audit_logs" ("created_at");
+CREATE INDEX IF NOT EXISTS "audit_logs_idx_created" ON "audit_logs" ("created_at");
 CREATE INDEX IF NOT EXISTS "idx_event" ON "audit_logs" ("event_type", "created_at");
 CREATE INDEX IF NOT EXISTS "idx_session_event" ON "audit_logs" ("chat_session_id", "event_type", "created_at");
 
 -- critic_feedback
 CREATE TABLE IF NOT EXISTS "critic_feedback" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "target_type" TEXT NOT NULL,
     "target_id" INTEGER NOT NULL,
@@ -149,8 +149,8 @@ CREATE TABLE IF NOT EXISTS "critic_feedback" (
     "feedback_note" TEXT,
     "source" TEXT DEFAULT 'manual_ui'
 );
-CREATE INDEX IF NOT EXISTS "idx_session_target" ON "critic_feedback" ("chat_session_id", "target_type", "target_id");
-CREATE INDEX IF NOT EXISTS "idx_created" ON "critic_feedback" ("created_at");
+CREATE INDEX IF NOT EXISTS "critic_feedback_idx_session_target" ON "critic_feedback" ("chat_session_id", "target_type", "target_id");
+CREATE INDEX IF NOT EXISTS "critic_feedback_idx_created" ON "critic_feedback" ("created_at");
 
 -- persona_memory_capsules
 CREATE TABLE IF NOT EXISTS "persona_memory_capsules" (
@@ -161,11 +161,11 @@ CREATE TABLE IF NOT EXISTS "persona_memory_capsules" (
     "title" TEXT NOT NULL,
     "mode" TEXT NOT NULL DEFAULT 'manual',
     "summary" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_persona_key" ON "persona_memory_capsules" ("persona_key");
-CREATE INDEX IF NOT EXISTS "idx_source_session" ON "persona_memory_capsules" ("source_chat_session_id");
+CREATE INDEX IF NOT EXISTS "persona_memory_capsules_idx_source_session" ON "persona_memory_capsules" ("source_chat_session_id");
 CREATE INDEX IF NOT EXISTS "idx_capsule_updated" ON "persona_memory_capsules" ("updated_at");
 
 -- persona_memory_entries
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS "persona_memory_entries" (
     "tags_json" TEXT,
     "evidence_excerpt" TEXT,
     "injection_policy" TEXT NOT NULL DEFAULT 'support_only',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("capsule_id") REFERENCES "persona_memory_capsules" ("id") ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS "idx_capsule_turn" ON "persona_memory_entries" ("capsule_id", "source_turn_index");
@@ -208,14 +208,14 @@ CREATE TABLE IF NOT EXISTS "protagonist_entity_memories" (
     "tags_json" TEXT,
     "importance_10" REAL NULL,
     "emotional_weight" REAL NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_entity_source" ON "protagonist_entity_memories" ("persona_entity_key", "source_chat_session_id", "source_turn_index");
 CREATE INDEX IF NOT EXISTS "idx_owner_source" ON "protagonist_entity_memories" ("owner_entity_key", "source_chat_session_id", "source_turn_index");
 CREATE INDEX IF NOT EXISTS "idx_owner_visibility" ON "protagonist_entity_memories" ("owner_entity_key", "owner_entity_role", "owner_visibility");
 CREATE INDEX IF NOT EXISTS "idx_entity_updated" ON "protagonist_entity_memories" ("persona_entity_key", "updated_at");
-CREATE INDEX IF NOT EXISTS "idx_source_session" ON "protagonist_entity_memories" ("source_chat_session_id");
+CREATE INDEX IF NOT EXISTS "protagonist_entity_memories_idx_source_session" ON "protagonist_entity_memories" ("source_chat_session_id");
 
 -- persona_capsule_attachments
 CREATE TABLE IF NOT EXISTS "persona_capsule_attachments" (
@@ -224,8 +224,8 @@ CREATE TABLE IF NOT EXISTS "persona_capsule_attachments" (
     "target_chat_session_id" TEXT NOT NULL,
     "injection_mode" TEXT NOT NULL DEFAULT 'subtle_deja_vu',
     "enabled" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("capsule_id", "target_chat_session_id"),
     FOREIGN KEY ("capsule_id") REFERENCES "persona_memory_capsules" ("id") ON DELETE CASCADE
 );
@@ -239,10 +239,10 @@ CREATE TABLE IF NOT EXISTS "character_events" (
     "turn_index" INTEGER NULL,
     "event_type" TEXT NOT NULL,
     "details_json" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_char" ON "character_events" ("chat_session_id", "character_name");
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "character_events" ("chat_session_id", "turn_index");
+CREATE INDEX IF NOT EXISTS "character_events_idx_session_char" ON "character_events" ("chat_session_id", "character_name");
+CREATE INDEX IF NOT EXISTS "character_events_idx_session_turn" ON "character_events" ("chat_session_id", "turn_index");
 
 -- entities
 CREATE TABLE IF NOT EXISTS "entities" (
@@ -258,11 +258,11 @@ CREATE TABLE IF NOT EXISTS "entities" (
     "pinned" INTEGER NOT NULL DEFAULT 0,
     "suppressed" INTEGER NOT NULL DEFAULT 0,
     "user_corrected" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_session_name" ON "entities" ("chat_session_id", "name");
-CREATE INDEX IF NOT EXISTS "idx_session_type" ON "entities" ("chat_session_id", "entity_type");
+CREATE INDEX IF NOT EXISTS "entities_idx_session_type" ON "entities" ("chat_session_id", "entity_type");
 
 -- trust_states
 CREATE TABLE IF NOT EXISTS "trust_states" (
@@ -276,11 +276,11 @@ CREATE TABLE IF NOT EXISTS "trust_states" (
     "pinned" INTEGER NOT NULL DEFAULT 0,
     "suppressed" INTEGER NOT NULL DEFAULT 0,
     "user_corrected" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_target" ON "trust_states" ("chat_session_id", "target_name");
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "trust_states" ("chat_session_id", "source_turn");
+CREATE INDEX IF NOT EXISTS "trust_states_idx_session_target" ON "trust_states" ("chat_session_id", "target_name");
+CREATE INDEX IF NOT EXISTS "trust_states_idx_session_turn" ON "trust_states" ("chat_session_id", "source_turn");
 
 -- storylines
 CREATE TABLE IF NOT EXISTS "storylines" (
@@ -300,10 +300,10 @@ CREATE TABLE IF NOT EXISTS "storylines" (
     "pinned" INTEGER NOT NULL DEFAULT 0,
     "suppressed" INTEGER NOT NULL DEFAULT 0,
     "user_corrected" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_status" ON "storylines" ("chat_session_id", "status");
+CREATE INDEX IF NOT EXISTS "storylines_idx_session_status" ON "storylines" ("chat_session_id", "status");
 CREATE INDEX IF NOT EXISTS "idx_session_last_turn" ON "storylines" ("chat_session_id", "last_turn");
 
 -- guidance_plan_states
@@ -315,8 +315,8 @@ CREATE TABLE IF NOT EXISTS "guidance_plan_states" (
     "state_status" TEXT NOT NULL DEFAULT 'empty',
     "last_turn" INTEGER NOT NULL DEFAULT -1,
     "warnings_json" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id")
 );
 CREATE INDEX IF NOT EXISTS "idx_guidance_plan_updated" ON "guidance_plan_states" ("updated_at");
@@ -335,8 +335,8 @@ CREATE TABLE IF NOT EXISTS "world_rules" (
     "pinned" INTEGER NOT NULL DEFAULT 0,
     "suppressed" INTEGER NOT NULL DEFAULT 0,
     "user_corrected" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_session_scope" ON "world_rules" ("chat_session_id", "scope", "category", "key");
 
@@ -346,7 +346,7 @@ CREATE TABLE IF NOT EXISTS "session_active_scopes" (
     "chat_session_id" TEXT NOT NULL,
     "active_scope" TEXT NOT NULL DEFAULT 'root',
     "scope_name" TEXT,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id")
 );
 
@@ -362,11 +362,11 @@ CREATE TABLE IF NOT EXISTS "character_states" (
     "speech_style_json" TEXT,
     "field_provenance_json" TEXT NULL,
     "turn_index" INTEGER,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_char" ON "character_states" ("chat_session_id", "character_name");
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "character_states" ("chat_session_id", "turn_index");
+CREATE INDEX IF NOT EXISTS "character_states_idx_session_char" ON "character_states" ("chat_session_id", "character_name");
+CREATE INDEX IF NOT EXISTS "character_states_idx_session_turn" ON "character_states" ("chat_session_id", "turn_index");
 
 -- pending_threads
 CREATE TABLE IF NOT EXISTS "pending_threads" (
@@ -384,11 +384,11 @@ CREATE TABLE IF NOT EXISTS "pending_threads" (
     "pinned" INTEGER NOT NULL DEFAULT 0,
     "suppressed" INTEGER NOT NULL DEFAULT 0,
     "user_corrected" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_status" ON "pending_threads" ("chat_session_id", "status");
-CREATE INDEX IF NOT EXISTS "idx_session_source_turn" ON "pending_threads" ("chat_session_id", "source_turn");
+CREATE INDEX IF NOT EXISTS "pending_threads_idx_session_status" ON "pending_threads" ("chat_session_id", "status");
+CREATE INDEX IF NOT EXISTS "pending_threads_idx_session_source_turn" ON "pending_threads" ("chat_session_id", "source_turn");
 
 -- active_states
 CREATE TABLE IF NOT EXISTS "active_states" (
@@ -397,9 +397,9 @@ CREATE TABLE IF NOT EXISTS "active_states" (
     "state_type" TEXT NOT NULL,
     "content" TEXT NOT NULL,
     "turn_index" INTEGER NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_type" ON "active_states" ("chat_session_id", "state_type", "turn_index");
+CREATE INDEX IF NOT EXISTS "active_states_idx_session_type" ON "active_states" ("chat_session_id", "state_type", "turn_index");
 
 -- canonical_state_layers
 CREATE TABLE IF NOT EXISTS "canonical_state_layers" (
@@ -413,9 +413,9 @@ CREATE TABLE IF NOT EXISTS "canonical_state_layers" (
     "source_record" INTEGER,
     "last_verified_turn" INTEGER,
     "confidence" REAL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_type" ON "canonical_state_layers" ("chat_session_id", "layer_type", "turn_index");
+CREATE INDEX IF NOT EXISTS "canonical_state_layers_idx_session_type" ON "canonical_state_layers" ("chat_session_id", "layer_type", "turn_index");
 
 -- episode_summaries
 CREATE TABLE IF NOT EXISTS "episode_summaries" (
@@ -430,9 +430,9 @@ CREATE TABLE IF NOT EXISTS "episode_summaries" (
     "relationship_changes_json" TEXT,
     "embedding_vector" TEXT,
     "embedding_model" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turns" ON "episode_summaries" ("chat_session_id", "from_turn", "to_turn");
+CREATE INDEX IF NOT EXISTS "episode_summaries_idx_session_turns" ON "episode_summaries" ("chat_session_id", "from_turn", "to_turn");
 
 -- chapter_summaries
 CREATE TABLE IF NOT EXISTS "chapter_summaries" (
@@ -450,9 +450,9 @@ CREATE TABLE IF NOT EXISTS "chapter_summaries" (
     "resume_text" TEXT,
     "embedding_vector" TEXT,
     "embedding_model" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turns" ON "chapter_summaries" ("chat_session_id", "from_turn", "to_turn");
+CREATE INDEX IF NOT EXISTS "chapter_summaries_idx_session_turns" ON "chapter_summaries" ("chat_session_id", "from_turn", "to_turn");
 CREATE INDEX IF NOT EXISTS "idx_session_chapter" ON "chapter_summaries" ("chat_session_id", "chapter_index");
 
 -- arc_summaries
@@ -477,11 +477,11 @@ CREATE TABLE IF NOT EXISTS "arc_summaries" (
     "arc_resume_text" TEXT,
     "embedding_vector" TEXT,
     "embedding_model" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turns" ON "arc_summaries" ("chat_session_id", "from_turn", "to_turn");
+CREATE INDEX IF NOT EXISTS "arc_summaries_idx_session_turns" ON "arc_summaries" ("chat_session_id", "from_turn", "to_turn");
 CREATE INDEX IF NOT EXISTS "idx_session_arc" ON "arc_summaries" ("chat_session_id", "arc_index");
-CREATE INDEX IF NOT EXISTS "idx_session_status" ON "arc_summaries" ("chat_session_id", "arc_status");
+CREATE INDEX IF NOT EXISTS "arc_summaries_idx_session_status" ON "arc_summaries" ("chat_session_id", "arc_status");
 
 -- saga_digests
 CREATE TABLE IF NOT EXISTS "saga_digests" (
@@ -496,9 +496,9 @@ CREATE TABLE IF NOT EXISTS "saga_digests" (
     "resume_pack_text" TEXT,
     "embedding_vector" TEXT,
     "embedding_model" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turns" ON "saga_digests" ("chat_session_id", "from_turn", "to_turn");
+CREATE INDEX IF NOT EXISTS "saga_digests_idx_session_turns" ON "saga_digests" ("chat_session_id", "from_turn", "to_turn");
 CREATE INDEX IF NOT EXISTS "idx_session_created" ON "saga_digests" ("chat_session_id", "created_at");
 
 -- session_migrations
@@ -513,12 +513,12 @@ CREATE TABLE IF NOT EXISTS "session_migrations" (
     "counts_json" TEXT,
     "chroma_reindexed_count" INTEGER NOT NULL DEFAULT 0,
     "errors_json" TEXT,
-    "started_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "started_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "completed_at" TEXT NULL,
     "locked_at" TEXT NULL,
     "cleanup_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_session_migration_source" ON "session_migrations" ("source_session_id", "status");
 CREATE INDEX IF NOT EXISTS "idx_session_migration_target" ON "session_migrations" ("target_session_id", "status");
@@ -532,7 +532,7 @@ CREATE TABLE IF NOT EXISTS "session_migration_row_map" (
     "source_row_id" INTEGER NOT NULL,
     "target_row_id" INTEGER NULL,
     "row_status" TEXT NOT NULL DEFAULT 'copied',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("migration_id", "table_name", "source_row_id"),
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
 );
@@ -544,7 +544,7 @@ CREATE TABLE IF NOT EXISTS "session_migration_reference_binding_map" (
     "source_binding_id" TEXT NOT NULL,
     "target_binding_id" TEXT NOT NULL,
     "row_status" TEXT NOT NULL DEFAULT 'copied',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     PRIMARY KEY ("migration_id", "source_binding_id"),
     UNIQUE ("migration_id", "target_binding_id"),
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
@@ -559,10 +559,10 @@ CREATE TABLE IF NOT EXISTS "session_migration_locks" (
     "locked" INTEGER NOT NULL DEFAULT 1,
     "lock_status" TEXT NOT NULL DEFAULT 'migrated_away',
     "reason" TEXT,
-    "locked_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "locked_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "unlocked_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS "idx_session_migration_lock_source" ON "session_migration_locks" ("source_session_id", "locked");
@@ -590,12 +590,12 @@ CREATE TABLE IF NOT EXISTS "consequence_records" (
     "expires_after_quiet_turns" INTEGER NOT NULL DEFAULT 20,
     "source_hash" TEXT NULL,
     "evidence_json" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_status" ON "consequence_records" ("chat_session_id", "status");
-CREATE INDEX IF NOT EXISTS "idx_session_source_turn" ON "consequence_records" ("chat_session_id", "source_turn_start", "source_turn_end");
-CREATE INDEX IF NOT EXISTS "idx_session_foreground" ON "consequence_records" ("chat_session_id", "foreground_eligible", "status");
+CREATE INDEX IF NOT EXISTS "consequence_records_idx_session_status" ON "consequence_records" ("chat_session_id", "status");
+CREATE INDEX IF NOT EXISTS "consequence_records_idx_session_source_turn" ON "consequence_records" ("chat_session_id", "source_turn_start", "source_turn_end");
+CREATE INDEX IF NOT EXISTS "consequence_records_idx_session_foreground" ON "consequence_records" ("chat_session_id", "foreground_eligible", "status");
 
 -- psychology_branches
 CREATE TABLE IF NOT EXISTS "psychology_branches" (
@@ -616,13 +616,13 @@ CREATE TABLE IF NOT EXISTS "psychology_branches" (
     "quiet_turns" INTEGER NOT NULL DEFAULT 0,
     "last_seen_turn" INTEGER NULL,
     "dormant_after_quiet_turns" INTEGER NOT NULL DEFAULT 15,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_status" ON "psychology_branches" ("chat_session_id", "status");
-CREATE INDEX IF NOT EXISTS "idx_session_type" ON "psychology_branches" ("chat_session_id", "branch_type");
+CREATE INDEX IF NOT EXISTS "psychology_branches_idx_session_status" ON "psychology_branches" ("chat_session_id", "status");
+CREATE INDEX IF NOT EXISTS "psychology_branches_idx_session_type" ON "psychology_branches" ("chat_session_id", "branch_type");
 CREATE INDEX IF NOT EXISTS "idx_session_character" ON "psychology_branches" ("chat_session_id", "character_name");
-CREATE INDEX IF NOT EXISTS "idx_session_dormancy" ON "psychology_branches" ("chat_session_id", "status", "quiet_turns");
+CREATE INDEX IF NOT EXISTS "psychology_branches_idx_session_dormancy" ON "psychology_branches" ("chat_session_id", "status", "quiet_turns");
 
 -- session_fork_lineage
 CREATE TABLE IF NOT EXISTS "session_fork_lineage" (
@@ -638,17 +638,16 @@ CREATE TABLE IF NOT EXISTS "session_fork_lineage" (
     "fork_source_message_id" TEXT NULL,
     "fork_source_role" TEXT NULL,
     "idempotency_key" TEXT NULL,
-    "imported_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "imported_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "divergence_marker" TEXT,
     "provenance_source" TEXT NOT NULL DEFAULT 'manual',
     "inheritance_mode" TEXT NOT NULL DEFAULT 'conservative_import',
     "inherited_items_json" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    UNIQUE ("chat_session_id", "idempotency_key"),
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "idempotency_key")
 );
-CREATE INDEX IF NOT EXISTS "idx_session" ON "session_fork_lineage" ("chat_session_id");
+CREATE INDEX IF NOT EXISTS "session_fork_lineage_idx_session" ON "session_fork_lineage" ("chat_session_id");
 CREATE INDEX IF NOT EXISTS "idx_scope" ON "session_fork_lineage" ("scope_id");
 CREATE INDEX IF NOT EXISTS "idx_parent_scope" ON "session_fork_lineage" ("parent_scope_id");
 CREATE INDEX IF NOT EXISTS "idx_copied_from_scope" ON "session_fork_lineage" ("copied_from_scope_id");
@@ -674,13 +673,13 @@ CREATE TABLE IF NOT EXISTS "theme_offscreen_carries" (
     "dormant_after_quiet_turns" INTEGER NOT NULL DEFAULT 15,
     "foreground_eligible" INTEGER NOT NULL DEFAULT 0,
     "foreground_reason_json" TEXT,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_type" ON "theme_offscreen_carries" ("chat_session_id", "surface_type");
-CREATE INDEX IF NOT EXISTS "idx_session_status" ON "theme_offscreen_carries" ("chat_session_id", "status");
-CREATE INDEX IF NOT EXISTS "idx_session_dormancy" ON "theme_offscreen_carries" ("chat_session_id", "status", "quiet_turns");
-CREATE INDEX IF NOT EXISTS "idx_session_foreground" ON "theme_offscreen_carries" ("chat_session_id", "surface_type", "foreground_eligible", "status");
+CREATE INDEX IF NOT EXISTS "theme_offscreen_carries_idx_session_type" ON "theme_offscreen_carries" ("chat_session_id", "surface_type");
+CREATE INDEX IF NOT EXISTS "theme_offscreen_carries_idx_session_status" ON "theme_offscreen_carries" ("chat_session_id", "status");
+CREATE INDEX IF NOT EXISTS "theme_offscreen_carries_idx_session_dormancy" ON "theme_offscreen_carries" ("chat_session_id", "status", "quiet_turns");
+CREATE INDEX IF NOT EXISTS "theme_offscreen_carries_idx_session_foreground" ON "theme_offscreen_carries" ("chat_session_id", "surface_type", "foreground_eligible", "status");
 
 -- capture_verification_records
 CREATE TABLE IF NOT EXISTS "capture_verification_records" (
@@ -700,12 +699,12 @@ CREATE TABLE IF NOT EXISTS "capture_verification_records" (
     "repaired_at" TEXT NULL,
     "user_input_preserved" INTEGER NOT NULL DEFAULT 1,
     "payload_rewrite" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "idx_session_turn" ON "capture_verification_records" ("chat_session_id", "turn_index");
+CREATE INDEX IF NOT EXISTS "capture_verification_records_idx_session_turn" ON "capture_verification_records" ("chat_session_id", "turn_index");
 CREATE INDEX IF NOT EXISTS "idx_session_stage" ON "capture_verification_records" ("chat_session_id", "stage_name");
-CREATE INDEX IF NOT EXISTS "idx_session_state" ON "capture_verification_records" ("chat_session_id", "verification_state");
+CREATE INDEX IF NOT EXISTS "capture_verification_records_idx_session_state" ON "capture_verification_records" ("chat_session_id", "verification_state");
 CREATE INDEX IF NOT EXISTS "idx_previous_record" ON "capture_verification_records" ("previous_record_id");
 CREATE INDEX IF NOT EXISTS "idx_repaired_by" ON "capture_verification_records" ("repaired_by_record_id");
 
@@ -722,8 +721,8 @@ CREATE TABLE IF NOT EXISTS "status_schema_proposals" (
     "review_note" TEXT NULL,
     "reviewer" TEXT NULL,
     "reviewed_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_status_schema_session" ON "status_schema_proposals" ("chat_session_id", "updated_at");
 CREATE INDEX IF NOT EXISTS "idx_status_schema_state" ON "status_schema_proposals" ("chat_session_id", "proposal_state", "updated_at");
@@ -744,8 +743,8 @@ CREATE TABLE IF NOT EXISTS "status_schema_registry" (
     "options_json" TEXT NULL,
     "default_value_json" TEXT NULL,
     "registry_state" TEXT NOT NULL DEFAULT 'active',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "schema_name", "status_key", "owner_scope"),
     FOREIGN KEY ("source_proposal_id") REFERENCES "status_schema_proposals" ("id") ON DELETE SET NULL
 );
@@ -766,8 +765,8 @@ CREATE TABLE IF NOT EXISTS "status_current_values" (
     "evidence_json" TEXT NOT NULL,
     "source_turn" INTEGER NULL,
     "write_state" TEXT NOT NULL DEFAULT 'current',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "registry_id", "owner_scope", "owner_id"),
     FOREIGN KEY ("registry_id") REFERENCES "status_schema_registry" ("id") ON DELETE CASCADE
 );
@@ -791,7 +790,7 @@ CREATE TABLE IF NOT EXISTS "status_change_events" (
     "source_turn" INTEGER NULL,
     "story_clock_json" TEXT NULL,
     "event_state" TEXT NOT NULL DEFAULT 'recorded',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("registry_id") REFERENCES "status_schema_registry" ("id") ON DELETE CASCADE,
     FOREIGN KEY ("status_value_id") REFERENCES "status_current_values" ("id") ON DELETE SET NULL
 );
@@ -818,8 +817,8 @@ CREATE TABLE IF NOT EXISTS "status_effects" (
     "effect_state" TEXT NOT NULL DEFAULT 'active',
     "cleared_evidence_json" TEXT NULL,
     "cleared_turn" INTEGER NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("registry_id") REFERENCES "status_schema_registry" ("id") ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS "idx_status_effect_session" ON "status_effects" ("chat_session_id", "effect_state", "updated_at");
@@ -828,22 +827,22 @@ CREATE INDEX IF NOT EXISTS "idx_status_effect_registry" ON "status_effects" ("re
 
 -- reference_works
 CREATE TABLE IF NOT EXISTS "reference_works" (
-    "work_id" TEXT PRIMARY KEY,
+    "work_id" TEXT PRIMARY KEY NOT NULL,
     "title" TEXT NOT NULL,
     "work_type" TEXT NOT NULL DEFAULT 'custom',
     "default_language" TEXT NOT NULL DEFAULT '',
     "status" TEXT NOT NULL DEFAULT 'draft',
     "metadata_json" TEXT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_reference_work_status" ON "reference_works" ("status", "updated_at");
 CREATE INDEX IF NOT EXISTS "idx_reference_work_title" ON "reference_works" ("title");
 
 -- reference_continuities
 CREATE TABLE IF NOT EXISTS "reference_continuities" (
-    "continuity_id" TEXT PRIMARY KEY,
+    "continuity_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "continuity_key" TEXT NOT NULL,
     "label" TEXT NOT NULL,
@@ -851,8 +850,8 @@ CREATE TABLE IF NOT EXISTS "reference_continuities" (
     "status" TEXT NOT NULL DEFAULT 'active',
     "metadata_json" TEXT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("work_id", "continuity_key"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
     FOREIGN KEY ("parent_continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE SET NULL
@@ -861,7 +860,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_continuity_work" ON "reference_continu
 
 -- reference_documents
 CREATE TABLE IF NOT EXISTS "reference_documents" (
-    "document_id" TEXT PRIMARY KEY,
+    "document_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "continuity_id" TEXT NOT NULL,
     "source_type" TEXT NOT NULL DEFAULT 'manual_text',
@@ -871,8 +870,8 @@ CREATE TABLE IF NOT EXISTS "reference_documents" (
     "raw_text" TEXT NULL,
     "import_status" TEXT NOT NULL DEFAULT 'pending',
     "provenance_json" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("work_id", "continuity_id", "content_hash"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE CASCADE
@@ -881,7 +880,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_document_status" ON "reference_documen
 
 -- reference_timeline_nodes
 CREATE TABLE IF NOT EXISTS "reference_timeline_nodes" (
-    "node_id" TEXT PRIMARY KEY,
+    "node_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "continuity_id" TEXT NOT NULL,
     "node_key" TEXT NOT NULL,
@@ -895,8 +894,8 @@ CREATE TABLE IF NOT EXISTS "reference_timeline_nodes" (
     "review_source" TEXT NOT NULL DEFAULT '',
     "review_reason" TEXT NULL,
     "reviewed_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("continuity_id", "branch_key", "node_key"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE CASCADE,
@@ -907,7 +906,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_timeline_review" ON "reference_timelin
 
 -- reference_entities
 CREATE TABLE IF NOT EXISTS "reference_entities" (
-    "entity_id" TEXT PRIMARY KEY,
+    "entity_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "continuity_id" TEXT NOT NULL,
     "entity_type" TEXT NOT NULL,
@@ -918,8 +917,8 @@ CREATE TABLE IF NOT EXISTS "reference_entities" (
     "review_source" TEXT NOT NULL DEFAULT '',
     "review_reason" TEXT NULL,
     "reviewed_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE CASCADE
 );
@@ -935,7 +934,7 @@ CREATE TABLE IF NOT EXISTS "reference_entity_aliases" (
     "alias_text" TEXT NOT NULL,
     "normalized_alias" TEXT NOT NULL,
     "language_code" TEXT NOT NULL DEFAULT '',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("work_id", "continuity_id", "entity_id", "normalized_alias"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE CASCADE,
@@ -945,7 +944,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_alias_lookup" ON "reference_entity_ali
 
 -- reference_claims
 CREATE TABLE IF NOT EXISTS "reference_claims" (
-    "claim_id" TEXT PRIMARY KEY,
+    "claim_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "continuity_id" TEXT NOT NULL,
     "document_id" TEXT NOT NULL,
@@ -965,8 +964,8 @@ CREATE TABLE IF NOT EXISTS "reference_claims" (
     "review_reason" TEXT NULL,
     "reviewed_at" TEXT NULL,
     "metadata_json" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE CASCADE,
     FOREIGN KEY ("document_id") REFERENCES "reference_documents" ("document_id") ON DELETE CASCADE,
@@ -983,7 +982,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_claim_document" ON "reference_claims" 
 CREATE TABLE IF NOT EXISTS "reference_claim_knowers" (
     "claim_id" TEXT NOT NULL,
     "entity_id" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     PRIMARY KEY ("claim_id", "entity_id"),
     FOREIGN KEY ("claim_id") REFERENCES "reference_claims" ("claim_id") ON DELETE CASCADE,
     FOREIGN KEY ("entity_id") REFERENCES "reference_entities" ("entity_id") ON DELETE CASCADE
@@ -992,7 +991,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_knower_entity" ON "reference_claim_kno
 
 -- session_reference_bindings
 CREATE TABLE IF NOT EXISTS "session_reference_bindings" (
-    "binding_id" TEXT PRIMARY KEY,
+    "binding_id" TEXT PRIMARY KEY NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "work_id" TEXT NOT NULL,
     "continuity_id" TEXT NOT NULL,
@@ -1007,8 +1006,8 @@ CREATE TABLE IF NOT EXISTS "session_reference_bindings" (
     "future_policy" TEXT NOT NULL DEFAULT 'block',
     "priority" INTEGER NOT NULL DEFAULT 0,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "work_id", "continuity_id"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE RESTRICT,
@@ -1021,7 +1020,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_binding_work" ON "session_reference_bi
 
 -- session_reference_runtime
 CREATE TABLE IF NOT EXISTS "session_reference_runtime" (
-    "binding_id" TEXT PRIMARY KEY,
+    "binding_id" TEXT PRIMARY KEY NOT NULL,
     "candidate_node_id" TEXT NULL,
     "candidate_source_turn" INTEGER NULL,
     "candidate_evidence_json" TEXT NULL,
@@ -1029,15 +1028,15 @@ CREATE TABLE IF NOT EXISTS "session_reference_runtime" (
     "last_claim_ids_json" TEXT NULL,
     "diagnostics_json" TEXT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("binding_id") REFERENCES "session_reference_bindings" ("binding_id") ON DELETE CASCADE,
     FOREIGN KEY ("candidate_node_id") REFERENCES "reference_timeline_nodes" ("node_id") ON DELETE SET NULL
 );
 
 -- session_reference_coverage_snapshots
 CREATE TABLE IF NOT EXISTS "session_reference_coverage_snapshots" (
-    "binding_id" TEXT PRIMARY KEY,
+    "binding_id" TEXT PRIMARY KEY NOT NULL,
     "contract_version" TEXT NOT NULL,
     "context_hash" TEXT NOT NULL,
     "inventory_hash" TEXT NOT NULL,
@@ -1047,8 +1046,8 @@ CREATE TABLE IF NOT EXISTS "session_reference_coverage_snapshots" (
     "covered_field_count" INTEGER NOT NULL DEFAULT 0,
     "stats_json" TEXT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("binding_id") REFERENCES "session_reference_bindings" ("binding_id") ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS "idx_reference_coverage_snapshot_hash" ON "session_reference_coverage_snapshots" ("snapshot_hash");
@@ -1069,8 +1068,8 @@ CREATE TABLE IF NOT EXISTS "session_reference_coverage_fields" (
     "matched_locations_json" TEXT NULL,
     "eligible" INTEGER NOT NULL DEFAULT 1,
     "eligibility_reason" TEXT NOT NULL DEFAULT 'eligible',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     PRIMARY KEY ("binding_id", "field_key"),
     FOREIGN KEY ("binding_id") REFERENCES "session_reference_coverage_snapshots" ("binding_id") ON DELETE CASCADE,
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE CASCADE,
@@ -1081,7 +1080,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_coverage_presence" ON "session_referen
 
 -- reference_work_editions
 CREATE TABLE IF NOT EXISTS "reference_work_editions" (
-    "edition_row_id" TEXT PRIMARY KEY,
+    "edition_row_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "stable_work_id" TEXT NOT NULL,
     "edition_id" TEXT NOT NULL,
@@ -1092,8 +1091,8 @@ CREATE TABLE IF NOT EXISTS "reference_work_editions" (
     "edition_status" TEXT NOT NULL DEFAULT 'active',
     "metadata_json" TEXT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("stable_work_id", "edition_id"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
     CONSTRAINT chk_reference_work_edition_status CHECK (edition_status IN ('active', 'inactive', 'deprecated'))
@@ -1102,7 +1101,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_work_edition_local" ON "reference_work
 
 -- canon_pack_installs
 CREATE TABLE IF NOT EXISTS "canon_pack_installs" (
-    "install_id" TEXT PRIMARY KEY,
+    "install_id" TEXT PRIMARY KEY NOT NULL,
     "pack_id" TEXT NOT NULL,
     "pack_version" TEXT NOT NULL,
     "install_generation" INTEGER NOT NULL,
@@ -1117,10 +1116,10 @@ CREATE TABLE IF NOT EXISTS "canon_pack_installs" (
     "lifecycle_status" TEXT NOT NULL DEFAULT 'staged',
     "validation_report_json" TEXT NOT NULL,
     "coverage_report_json" TEXT NOT NULL,
-    "installed_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "installed_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "activated_at" TEXT NULL,
     "removed_at" TEXT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "active_generation_marker" INTEGER AS (CASE WHEN lifecycle_status = 'active' THEN 1 ELSE NULL END) STORED,
     UNIQUE ("pack_id", "pack_version", "install_generation"),
     UNIQUE ("pack_id", "edition_row_id", "active_generation_marker"),
@@ -1133,7 +1132,7 @@ CREATE INDEX IF NOT EXISTS "idx_canon_pack_work_lifecycle" ON "canon_pack_instal
 
 -- reference_source_observations
 CREATE TABLE IF NOT EXISTS "reference_source_observations" (
-    "observation_id" TEXT PRIMARY KEY,
+    "observation_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "edition_row_id" TEXT NOT NULL,
     "continuity_id" TEXT NULL,
@@ -1149,7 +1148,7 @@ CREATE TABLE IF NOT EXISTS "reference_source_observations" (
     "document_sha256" TEXT NOT NULL,
     "document_id" TEXT NULL,
     "provenance_json" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("install_id", "source_key"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
     FOREIGN KEY ("edition_row_id") REFERENCES "reference_work_editions" ("edition_row_id") ON DELETE RESTRICT,
@@ -1165,7 +1164,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_source_hash" ON "reference_source_obse
 
 -- reference_work_titles
 CREATE TABLE IF NOT EXISTS "reference_work_titles" (
-    "title_row_id" TEXT PRIMARY KEY,
+    "title_row_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "edition_row_id" TEXT NULL,
     "title_kind" TEXT NOT NULL,
@@ -1176,7 +1175,7 @@ CREATE TABLE IF NOT EXISTS "reference_work_titles" (
     "normalized_lookup_key" TEXT NOT NULL,
     "normalized_lookup_digest" TEXT NOT NULL,
     "source_observation_id" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     "edition_scope_key" TEXT NOT NULL DEFAULT '',
     UNIQUE ("work_id", "edition_scope_key", "title_kind", "language_code", "normalization_contract", "normalized_lookup_digest"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
@@ -1193,7 +1192,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_title_lookup" ON "reference_work_title
 
 -- reference_item_origins
 CREATE TABLE IF NOT EXISTS "reference_item_origins" (
-    "origin_membership_id" TEXT PRIMARY KEY,
+    "origin_membership_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "edition_row_id" TEXT NOT NULL,
     "item_kind" TEXT NOT NULL,
@@ -1205,8 +1204,8 @@ CREATE TABLE IF NOT EXISTS "reference_item_origins" (
     "install_id" TEXT NULL,
     "source_item_id" TEXT NOT NULL,
     "review_state" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("origin_kind", "origin_owner_id", "item_kind", "source_item_id"),
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
     FOREIGN KEY ("edition_row_id") REFERENCES "reference_work_editions" ("edition_row_id") ON DELETE RESTRICT,
@@ -1227,7 +1226,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_item_origin_scope" ON "reference_item_
 
 -- reference_item_evidence
 CREATE TABLE IF NOT EXISTS "reference_item_evidence" (
-    "evidence_edge_id" TEXT PRIMARY KEY,
+    "evidence_edge_id" TEXT PRIMARY KEY NOT NULL,
     "item_kind" TEXT NOT NULL,
     "node_id" TEXT NULL,
     "entity_id" TEXT NULL,
@@ -1238,8 +1237,8 @@ CREATE TABLE IF NOT EXISTS "reference_item_evidence" (
     "locator_json" TEXT NOT NULL,
     "locator_digest" TEXT NOT NULL,
     "evidence_state" TEXT NOT NULL DEFAULT 'active',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("node_id", "source_observation_id", "document_hash_contract", "document_sha256", "locator_digest"),
     UNIQUE ("entity_id", "source_observation_id", "document_hash_contract", "document_sha256", "locator_digest"),
     UNIQUE ("claim_id", "source_observation_id", "document_hash_contract", "document_sha256", "locator_digest"),
@@ -1258,15 +1257,15 @@ CREATE INDEX IF NOT EXISTS "idx_reference_evidence_source" ON "reference_item_ev
 
 -- reference_logical_facts
 CREATE TABLE IF NOT EXISTS "reference_logical_facts" (
-    "logical_fact_id" TEXT PRIMARY KEY,
+    "logical_fact_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "edition_row_id" TEXT NOT NULL,
     "continuity_id" TEXT NOT NULL,
     "applicability_scope_digest" TEXT NOT NULL,
     "fact_status" TEXT NOT NULL DEFAULT 'active',
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
     FOREIGN KEY ("edition_row_id") REFERENCES "reference_work_editions" ("edition_row_id") ON DELETE RESTRICT,
     FOREIGN KEY ("continuity_id") REFERENCES "reference_continuities" ("continuity_id") ON DELETE RESTRICT,
@@ -1276,7 +1275,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_logical_fact_scope" ON "reference_logi
 
 -- reference_fact_identities
 CREATE TABLE IF NOT EXISTS "reference_fact_identities" (
-    "claim_id" TEXT PRIMARY KEY,
+    "claim_id" TEXT PRIMARY KEY NOT NULL,
     "fingerprint_contract" TEXT NOT NULL,
     "exact_fingerprint" TEXT NOT NULL,
     "logical_fact_id" TEXT NOT NULL,
@@ -1286,8 +1285,8 @@ CREATE TABLE IF NOT EXISTS "reference_fact_identities" (
     "continuity_id" TEXT NOT NULL,
     "applicability_scope_digest" TEXT NOT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("fingerprint_contract", "exact_fingerprint"),
     FOREIGN KEY ("claim_id") REFERENCES "reference_claims" ("claim_id") ON DELETE CASCADE,
     FOREIGN KEY ("logical_fact_id") REFERENCES "reference_logical_facts" ("logical_fact_id") ON DELETE RESTRICT,
@@ -1300,7 +1299,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_fact_logical" ON "reference_fact_ident
 
 -- reference_overlay_rules
 CREATE TABLE IF NOT EXISTS "reference_overlay_rules" (
-    "overlay_rule_id" TEXT PRIMARY KEY,
+    "overlay_rule_id" TEXT PRIMARY KEY NOT NULL,
     "work_id" TEXT NOT NULL,
     "edition_row_id" TEXT NOT NULL,
     "target_logical_fact_id" TEXT NULL,
@@ -1313,8 +1312,8 @@ CREATE TABLE IF NOT EXISTS "reference_overlay_rules" (
     "rule_status" TEXT NOT NULL DEFAULT 'active',
     "reason_text" TEXT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("work_id") REFERENCES "reference_works" ("work_id") ON DELETE RESTRICT,
     FOREIGN KEY ("edition_row_id") REFERENCES "reference_work_editions" ("edition_row_id") ON DELETE RESTRICT,
     FOREIGN KEY ("target_logical_fact_id") REFERENCES "reference_logical_facts" ("logical_fact_id") ON DELETE RESTRICT,
@@ -1334,7 +1333,7 @@ CREATE INDEX IF NOT EXISTS "idx_reference_overlay_scope" ON "reference_overlay_r
 
 -- source_discovery_jobs
 CREATE TABLE IF NOT EXISTS "source_discovery_jobs" (
-    "job_id" TEXT PRIMARY KEY,
+    "job_id" TEXT PRIMARY KEY NOT NULL,
     "contract_version" TEXT NOT NULL DEFAULT 'source-discovery-pipeline.v1',
     "work_query" TEXT NOT NULL,
     "original_title" TEXT NOT NULL DEFAULT '',
@@ -1345,8 +1344,8 @@ CREATE TABLE IF NOT EXISTS "source_discovery_jobs" (
     "result_json" TEXT NOT NULL,
     "coverage_report_json" TEXT NOT NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     CONSTRAINT chk_source_discovery_state CHECK (job_state IN (
         'created','scope_ready','discovering','fetching','extracting','reconciling',
         'coverage_review','ready_for_admission','awaiting_exception_review',
@@ -1357,7 +1356,7 @@ CREATE INDEX IF NOT EXISTS "idx_source_discovery_state" ON "source_discovery_job
 
 -- entity_identities
 CREATE TABLE IF NOT EXISTS "entity_identities" (
-    "stable_entity_id" TEXT PRIMARY KEY,
+    "stable_entity_id" TEXT PRIMARY KEY NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "identity_namespace" TEXT NOT NULL,
     "entity_kind" TEXT NOT NULL,
@@ -1378,8 +1377,8 @@ CREATE TABLE IF NOT EXISTS "entity_identities" (
     "mapping_revision" INTEGER NOT NULL DEFAULT 1,
     "first_seen_turn" INTEGER NOT NULL,
     "last_seen_turn" INTEGER NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "idempotency_key")
 );
 CREATE INDEX IF NOT EXISTS "idx_entity_identity_session" ON "entity_identities" ("chat_session_id", "identity_namespace", "lifecycle_state");
@@ -1388,7 +1387,7 @@ CREATE INDEX IF NOT EXISTS "idx_entity_identity_review" ON "entity_identities" (
 
 -- entity_identity_surfaces
 CREATE TABLE IF NOT EXISTS "entity_identity_surfaces" (
-    "surface_id" TEXT PRIMARY KEY,
+    "surface_id" TEXT PRIMARY KEY NOT NULL,
     "stable_entity_id" TEXT NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "identity_namespace" TEXT NOT NULL,
@@ -1406,8 +1405,8 @@ CREATE TABLE IF NOT EXISTS "entity_identity_surfaces" (
     "evidence_excerpt" TEXT NULL,
     "review_state" TEXT NOT NULL DEFAULT 'needs_review',
     "idempotency_key" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "idempotency_key"),
     FOREIGN KEY ("stable_entity_id") REFERENCES "entity_identities" ("stable_entity_id") ON DELETE RESTRICT
 );
@@ -1416,7 +1415,7 @@ CREATE INDEX IF NOT EXISTS "idx_entity_surface_identity" ON "entity_identity_sur
 
 -- entity_identity_links
 CREATE TABLE IF NOT EXISTS "entity_identity_links" (
-    "link_id" TEXT PRIMARY KEY,
+    "link_id" TEXT PRIMARY KEY NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "source_entity_id" TEXT NOT NULL,
     "target_entity_id" TEXT NOT NULL,
@@ -1424,8 +1423,8 @@ CREATE TABLE IF NOT EXISTS "entity_identity_links" (
     "link_state" TEXT NOT NULL DEFAULT 'needs_review',
     "evidence_json" TEXT NOT NULL,
     "mapping_revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "source_entity_id", "target_entity_id", "link_kind"),
     FOREIGN KEY ("source_entity_id") REFERENCES "entity_identities" ("stable_entity_id") ON DELETE RESTRICT,
     FOREIGN KEY ("target_entity_id") REFERENCES "entity_identities" ("stable_entity_id") ON DELETE RESTRICT
@@ -1434,7 +1433,7 @@ CREATE INDEX IF NOT EXISTS "idx_entity_identity_link_review" ON "entity_identity
 
 -- entity_identity_artifact_bindings
 CREATE TABLE IF NOT EXISTS "entity_identity_artifact_bindings" (
-    "binding_id" TEXT PRIMARY KEY,
+    "binding_id" TEXT PRIMARY KEY NOT NULL,
     "stable_entity_id" TEXT NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "artifact_kind" TEXT NOT NULL,
@@ -1446,7 +1445,7 @@ CREATE TABLE IF NOT EXISTS "entity_identity_artifact_bindings" (
     "source_revision" TEXT NOT NULL,
     "source_turn" INTEGER NOT NULL,
     "idempotency_key" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "idempotency_key"),
     FOREIGN KEY ("stable_entity_id") REFERENCES "entity_identities" ("stable_entity_id") ON DELETE RESTRICT
 );
@@ -1455,7 +1454,7 @@ CREATE INDEX IF NOT EXISTS "idx_entity_artifact_binding_identity" ON "entity_ide
 
 -- speaker_attributions
 CREATE TABLE IF NOT EXISTS "speaker_attributions" (
-    "attribution_id" TEXT PRIMARY KEY,
+    "attribution_id" TEXT PRIMARY KEY NOT NULL,
     "chat_session_id" TEXT NOT NULL,
     "speaker_entity_id" TEXT NOT NULL,
     "identity_namespace" TEXT NOT NULL,
@@ -1475,8 +1474,8 @@ CREATE TABLE IF NOT EXISTS "speaker_attributions" (
     "source_span_end" INTEGER NOT NULL,
     "evidence_excerpt" TEXT NOT NULL,
     "idempotency_key" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("chat_session_id", "idempotency_key"),
     FOREIGN KEY ("speaker_entity_id") REFERENCES "entity_identities" ("stable_entity_id") ON DELETE RESTRICT
 );
@@ -1525,8 +1524,8 @@ CREATE TABLE IF NOT EXISTS "precise_memory_units" (
     "confidence" REAL NOT NULL DEFAULT 0,
     "idempotency_key" TEXT NOT NULL,
     "lifecycle_state" TEXT NOT NULL DEFAULT 'active',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("unit_id"),
     UNIQUE ("chat_session_id", "idempotency_key"),
     FOREIGN KEY ("root_evidence_id") REFERENCES "direct_evidence_records" ("id") ON DELETE SET NULL,
@@ -1579,10 +1578,9 @@ CREATE TABLE IF NOT EXISTS "memory_source_revisions" (
     "superseded_by_revision" TEXT NULL,
     "invalidation_reason" TEXT NULL,
     "invalidated_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("source_revision"),
-    UNIQUE ("chat_session_id", "active_logical_turn_slot"),
     UNIQUE ("chat_session_id", "active_logical_turn_slot"),
     CONSTRAINT chk_memory_source_lifecycle CHECK (lifecycle_state IN ('active', 'superseded', 'invalidated', 'deleted')),
     CONSTRAINT chk_memory_source_admission CHECK (derived_admission_state IN ('pending', 'committed')),
@@ -1609,8 +1607,8 @@ CREATE TABLE IF NOT EXISTS "memory_derivation_dependencies" (
     "index_version" TEXT NOT NULL,
     "lifecycle_state" TEXT NOT NULL DEFAULT 'active',
     "invalidated_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("source_revision", "child_artifact_type", "child_artifact_id", "parent_artifact_type", "parent_artifact_id", "derivation_version", "extractor_version", "index_version"),
     FOREIGN KEY ("source_revision") REFERENCES "memory_source_revisions" ("source_revision") ON DELETE RESTRICT,
     CONSTRAINT chk_memory_derivation_lifecycle CHECK (lifecycle_state IN ('active', 'invalidated', 'deleted'))
@@ -1636,8 +1634,8 @@ CREATE TABLE IF NOT EXISTS "memory_reprocessing_jobs" (
     "lease_owner" TEXT NULL,
     "lease_until" TEXT NULL,
     "last_error" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("idempotency_key"),
     FOREIGN KEY ("source_revision") REFERENCES "memory_source_revisions" ("source_revision") ON DELETE RESTRICT,
     CONSTRAINT chk_memory_reprocessing_status CHECK (status IN ('pending', 'leased', 'retryable', 'permanent', 'completed', 'stale_rejected'))
@@ -1663,8 +1661,8 @@ CREATE TABLE IF NOT EXISTS "memory_vector_outbox" (
     "lease_owner" TEXT NULL,
     "lease_until" TEXT NULL,
     "last_error" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("operation_key"),
     FOREIGN KEY ("source_revision") REFERENCES "memory_source_revisions" ("source_revision") ON DELETE RESTRICT,
     CONSTRAINT chk_memory_vector_operation CHECK (operation IN ('delete', 'upsert')),
@@ -1687,8 +1685,8 @@ CREATE TABLE IF NOT EXISTS "session_route_bindings" (
     "redirected_from_session_id" TEXT NULL,
     "redirect_migration_id" INTEGER NULL,
     "revision" INTEGER NOT NULL DEFAULT 1,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("stable_character_id", "host_chat_id"),
     FOREIGN KEY ("redirect_migration_id") REFERENCES "session_migrations" ("id") ON DELETE SET NULL
 );
@@ -1719,8 +1717,8 @@ CREATE TABLE IF NOT EXISTS "session_migration_artifact_parity" (
     "parity_state" TEXT NOT NULL DEFAULT 'unverified',
     "blocker_code" TEXT NULL,
     "verified_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("migration_id", "manifest_version", "table_name"),
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
 );
@@ -1734,8 +1732,8 @@ CREATE TABLE IF NOT EXISTS "session_migration_artifact_row_map" (
     "source_key" TEXT NOT NULL,
     "target_key" TEXT NOT NULL,
     "row_status" TEXT NOT NULL DEFAULT 'copied',
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     PRIMARY KEY ("migration_id", "table_name", "key_column_name", "source_key"),
     UNIQUE ("migration_id", "table_name", "key_column_name", "target_key"),
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
@@ -1750,7 +1748,7 @@ CREATE TABLE IF NOT EXISTS "session_migration_vector_expected_ids" (
     "source_row_id" TEXT NOT NULL,
     "observed" INTEGER NOT NULL DEFAULT 0,
     "observed_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     PRIMARY KEY ("migration_id", "document_id"),
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
 );
@@ -1768,8 +1766,8 @@ CREATE TABLE IF NOT EXISTS "session_migration_saga_steps" (
     "last_error" TEXT NULL,
     "started_at" TEXT NULL,
     "completed_at" TEXT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     UNIQUE ("migration_id", "phase"),
     FOREIGN KEY ("migration_id") REFERENCES "session_migrations" ("id") ON DELETE CASCADE
 );
@@ -1778,8 +1776,8 @@ CREATE INDEX IF NOT EXISTS "idx_session_migration_saga_state" ON "session_migrat
 -- lorebook_reference_session_locks
 CREATE TABLE IF NOT EXISTS "lorebook_reference_session_locks" (
     "chat_session_id" TEXT NOT NULL PRIMARY KEY,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 
 -- lorebook_reference_scopes
@@ -1790,8 +1788,8 @@ CREATE TABLE IF NOT EXISTS "lorebook_reference_scopes" (
     "chat_index" INTEGER NULL,
     "enabled_modules_json" TEXT NOT NULL,
     "scope_identity_json" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_lorebook_scope_session" ON "lorebook_reference_scopes" ("chat_session_id");
 CREATE INDEX IF NOT EXISTS "idx_lorebook_scope_host" ON "lorebook_reference_scopes" ("chat_session_id", "character_index", "chat_index");
@@ -1807,7 +1805,7 @@ CREATE TABLE IF NOT EXISTS "lorebook_reference_snapshots" (
     "entry_count" INTEGER NOT NULL DEFAULT 0,
     "provenance_json" TEXT NOT NULL,
     "observed_at" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("scope_id") REFERENCES "lorebook_reference_scopes" ("scope_id") ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS "idx_lorebook_snapshot_scope" ON "lorebook_reference_snapshots" ("scope_id", "created_at");
@@ -1840,8 +1838,8 @@ CREATE TABLE IF NOT EXISTS "lorebook_reference_entries" (
     "is_current" INTEGER NOT NULL DEFAULT 1,
     "first_seen_at" TEXT NOT NULL,
     "last_seen_at" TEXT NOT NULL,
-    "created_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    "created_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
+    "updated_at" TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')) NOT NULL,
     FOREIGN KEY ("scope_id") REFERENCES "lorebook_reference_scopes" ("scope_id") ON DELETE CASCADE,
     FOREIGN KEY ("snapshot_id") REFERENCES "lorebook_reference_snapshots" ("snapshot_id") ON DELETE CASCADE
 );

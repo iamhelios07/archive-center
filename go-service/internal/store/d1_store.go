@@ -200,56 +200,369 @@ func (s *d1Store) ListMemories(ctx context.Context, chatSessionID string, fromTu
 }
 
 // ---------------------------------------------------------------------------
-// not yet implemented
+// direct evidence
 // ---------------------------------------------------------------------------
 
-func (s *d1Store) SaveEvidence(context.Context, *DirectEvidence) error {
-	return errD1Unimplemented
+func (s *d1Store) SaveEvidence(ctx context.Context, e *DirectEvidence) error {
+	if e == nil {
+		return errors.New("evidence is required")
+	}
+	var id int64
+	if err := s.conn.QueryRow(ctx, `
+		INSERT INTO direct_evidence_records (
+			chat_session_id, evidence_kind, evidence_text, source_turn_start, source_turn_end,
+			turn_anchor, source_message_ids_json, source_hash, archive_state, capture_stage,
+			capture_verification, committed_gate, lineage_json, repair_needed, tombstoned,
+			superseded_by_id, created_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id
+	`, e.ChatSessionID, e.EvidenceKind, e.EvidenceText, e.SourceTurnStart, e.SourceTurnEnd,
+		e.TurnAnchor, d1NullableString(e.SourceMessageIDsJSON), d1NullableString(e.SourceHash),
+		e.ArchiveState, e.CaptureStage, e.CaptureVerification, d1NullableString(e.CommittedGate),
+		d1NullableString(e.LineageJSON), d1BoolValue(e.RepairNeeded), d1BoolValue(e.Tombstoned),
+		e.SupersededByID, d1TimeValue(e.CreatedAt)).Scan(&id); err != nil {
+		return err
+	}
+	e.ID = id
+	return nil
 }
 
-func (s *d1Store) ListEvidence(context.Context, string) ([]DirectEvidence, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListEvidence(ctx context.Context, chatSessionID string) ([]DirectEvidence, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, chat_session_id, evidence_kind, evidence_text, source_turn_start, source_turn_end,
+			turn_anchor, source_message_ids_json, source_hash, archive_state, capture_stage,
+			capture_verification, committed_gate, lineage_json, repair_needed, tombstoned,
+			superseded_by_id, created_at
+		FROM direct_evidence_records
+		WHERE chat_session_id = ?
+		ORDER BY source_turn_start ASC, id ASC
+	`, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []DirectEvidence
+	for rows.Next() {
+		var item DirectEvidence
+		var turnAnchor, supersededByID *int64
+		var sourceMessageIDsJSON, sourceHash, committedGate, lineageJSON *string
+		if err := rows.Scan(
+			&item.ID, &item.ChatSessionID, &item.EvidenceKind, &item.EvidenceText,
+			&item.SourceTurnStart, &item.SourceTurnEnd, &turnAnchor,
+			&sourceMessageIDsJSON, &sourceHash, &item.ArchiveState, &item.CaptureStage,
+			&item.CaptureVerification, &committedGate, &lineageJSON, &item.RepairNeeded,
+			&item.Tombstoned, &supersededByID, &item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.TurnAnchor = int(d1DerefInt64(turnAnchor))
+		item.SourceMessageIDsJSON = d1DerefString(sourceMessageIDsJSON)
+		item.SourceHash = d1DerefString(sourceHash)
+		item.CommittedGate = d1DerefString(committedGate)
+		item.LineageJSON = d1DerefString(lineageJSON)
+		item.SupersededByID = d1DerefInt64(supersededByID)
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
-func (s *d1Store) SaveKGTriple(context.Context, *KGTriple) error {
-	return errD1Unimplemented
+// ---------------------------------------------------------------------------
+// knowledge graph triples
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) SaveKGTriple(ctx context.Context, t *KGTriple) error {
+	if t == nil {
+		return errors.New("kg triple is required")
+	}
+	var id int64
+	if err := s.conn.QueryRow(ctx, `
+		INSERT INTO kg_triples (chat_session_id, subject, predicate, object, valid_from, valid_to, source_turn, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING id
+	`, t.ChatSessionID, t.Subject, t.Predicate, t.Object, t.ValidFrom, t.ValidTo, t.SourceTurn,
+		d1TimeValue(t.CreatedAt)).Scan(&id); err != nil {
+		return err
+	}
+	t.ID = id
+	return nil
 }
 
-func (s *d1Store) ListKGTriples(context.Context, string) ([]KGTriple, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListKGTriples(ctx context.Context, chatSessionID string) ([]KGTriple, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, chat_session_id, subject, predicate, object, valid_from, valid_to, source_turn, created_at
+		FROM kg_triples
+		WHERE chat_session_id = ?
+		ORDER BY id ASC
+	`, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []KGTriple
+	for rows.Next() {
+		var item KGTriple
+		var validFrom, validTo, sourceTurn *int64
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.Subject, &item.Predicate,
+			&item.Object, &validFrom, &validTo, &sourceTurn, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.ValidFrom = int(d1DerefInt64(validFrom))
+		item.ValidTo = int(d1DerefInt64(validTo))
+		item.SourceTurn = int(d1DerefInt64(sourceTurn))
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
-func (s *d1Store) SaveAuditLog(context.Context, *AuditLog) error {
-	return errD1Unimplemented
+// ---------------------------------------------------------------------------
+// audit logs
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) SaveAuditLog(ctx context.Context, a *AuditLog) error {
+	if a == nil {
+		return errors.New("audit log is required")
+	}
+	// An unresolved turn uses -1 in request diagnostics, not a database row ID.
+	// The absent target is stored as NULL, matching the MariaDB path.
+	var targetID any = a.TargetID
+	if a.TargetID < 0 {
+		targetID = nil
+	}
+	_, err := s.conn.Exec(ctx, `
+		INSERT INTO audit_logs (created_at, event_type, chat_session_id, target_type, target_id, summary, details_json, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, d1TimeValue(a.CreatedAt), a.EventType, d1NullableString(a.ChatSessionID), d1NullableString(a.TargetType),
+		targetID, d1NullableString(a.Summary), d1NullableString(a.DetailsJSON), d1NullableString(a.Source))
+	return err
 }
 
-func (s *d1Store) ListAuditLogs(context.Context, string, string, int) ([]AuditLog, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListAuditLogs(ctx context.Context, chatSessionID string, eventType string, limit int) ([]AuditLog, error) {
+	query := `
+		SELECT id, created_at, event_type, chat_session_id, target_type, target_id, summary, details_json, source
+		FROM audit_logs
+		WHERE (? = '' OR chat_session_id = ?) AND (? = '' OR event_type = ?)
+		ORDER BY created_at DESC, id DESC
+	`
+	args := []any{strings.TrimSpace(chatSessionID), chatSessionID, strings.TrimSpace(eventType), eventType}
+	if limit > 0 {
+		query += "\nLIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []AuditLog
+	for rows.Next() {
+		var item AuditLog
+		var sid, targetType, summary, detailsJSON, source *string
+		var targetID *int64
+		if err := rows.Scan(&item.ID, &item.CreatedAt, &item.EventType, &sid, &targetType,
+			&targetID, &summary, &detailsJSON, &source); err != nil {
+			return nil, err
+		}
+		item.ChatSessionID = d1DerefString(sid)
+		item.TargetType = d1DerefString(targetType)
+		item.TargetID = d1DerefInt64(targetID)
+		item.Summary = d1DerefString(summary)
+		item.DetailsJSON = d1DerefString(detailsJSON)
+		item.Source = d1DerefString(source)
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
-func (s *d1Store) SaveCriticFeedback(context.Context, *CriticFeedback) error {
-	return errD1Unimplemented
+// ---------------------------------------------------------------------------
+// critic feedback
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) SaveCriticFeedback(ctx context.Context, f *CriticFeedback) error {
+	if f == nil {
+		return errors.New("critic feedback is required")
+	}
+	var id int64
+	if err := s.conn.QueryRow(ctx, `
+		INSERT INTO critic_feedback (created_at, chat_session_id, target_type, target_id, feedback_value, feedback_note, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		RETURNING id
+	`, d1TimeValue(f.CreatedAt), f.ChatSessionID, f.TargetType, f.TargetID, f.FeedbackValue,
+		d1NullableString(f.FeedbackNote), d1NullableString(f.Source)).Scan(&id); err != nil {
+		return err
+	}
+	f.ID = id
+	return nil
 }
 
-func (s *d1Store) ListCriticFeedback(context.Context, string, string, int64) ([]CriticFeedback, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListCriticFeedback(ctx context.Context, chatSessionID string, targetType string, targetID int64) ([]CriticFeedback, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, created_at, chat_session_id, target_type, target_id, feedback_value, feedback_note, source
+		FROM critic_feedback
+		WHERE chat_session_id = ? AND (? = '' OR target_type = ?) AND (? <= 0 OR target_id = ?)
+		ORDER BY created_at DESC, id DESC
+	`, chatSessionID, strings.TrimSpace(targetType), targetType, targetID, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CriticFeedback
+	for rows.Next() {
+		var item CriticFeedback
+		var note, source *string
+		if err := rows.Scan(&item.ID, &item.CreatedAt, &item.ChatSessionID, &item.TargetType,
+			&item.TargetID, &item.FeedbackValue, &note, &source); err != nil {
+			return nil, err
+		}
+		item.FeedbackNote = d1DerefString(note)
+		item.Source = d1DerefString(source)
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
-func (s *d1Store) SaveCharacterEvent(context.Context, *CharacterEvent) error {
-	return errD1Unimplemented
+// ---------------------------------------------------------------------------
+// character events
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) SaveCharacterEvent(ctx context.Context, e *CharacterEvent) error {
+	if e == nil {
+		return errors.New("character event is required")
+	}
+	var id int64
+	if err := s.conn.QueryRow(ctx, `
+		INSERT INTO character_events (chat_session_id, character_name, turn_index, event_type, details_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id
+	`, e.ChatSessionID, e.CharacterName, e.TurnIndex, e.EventType, d1NullableString(e.DetailsJSON),
+		d1TimeValue(e.CreatedAt)).Scan(&id); err != nil {
+		return err
+	}
+	e.ID = id
+	return nil
 }
 
-func (s *d1Store) ListCharacterEvents(context.Context, string, string) ([]CharacterEvent, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListCharacterEvents(ctx context.Context, chatSessionID string, characterName string) ([]CharacterEvent, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, chat_session_id, character_name, turn_index, event_type, details_json, created_at
+		FROM character_events
+		WHERE chat_session_id = ? AND (? = '' OR character_name = ?)
+		ORDER BY turn_index ASC, id ASC
+	`, chatSessionID, strings.TrimSpace(characterName), characterName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CharacterEvent
+	for rows.Next() {
+		var item CharacterEvent
+		var turnIndex *int64
+		var detailsJSON *string
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.CharacterName, &turnIndex,
+			&item.EventType, &detailsJSON, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.TurnIndex = int(d1DerefInt64(turnIndex))
+		item.DetailsJSON = d1DerefString(detailsJSON)
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
-func (s *d1Store) Stats(context.Context) (StatsResult, error) {
-	return StatsResult{}, errD1Unimplemented
+// ---------------------------------------------------------------------------
+// aggregations
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) Stats(ctx context.Context) (StatsResult, error) {
+	var out StatsResult
+	if err := s.conn.QueryRow(ctx, `SELECT COUNT(*) FROM chat_logs`).Scan(&out.ChatLogs); err != nil {
+		return StatsResult{}, err
+	}
+	if err := s.conn.QueryRow(ctx, `SELECT COUNT(*) FROM memories`).Scan(&out.Memories); err != nil {
+		return StatsResult{}, err
+	}
+	if err := s.conn.QueryRow(ctx, `SELECT COUNT(*) FROM kg_triples`).Scan(&out.KgTriples); err != nil {
+		return StatsResult{}, err
+	}
+	return out, nil
 }
 
-func (s *d1Store) ListSessions(context.Context) ([]SessionSummary, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListSessions(ctx context.Context) ([]SessionSummary, error) {
+	// SQLite has no GREATEST(); the scalar MAX(a, b, c) form is equivalent. The
+	// session id set is the union of the three ledgers, and last_activity is the
+	// newest timestamp across them. RFC3339 UTC text sorts chronologically, so a
+	// text MAX is a correct recency comparison.
+	rows, err := s.conn.Query(ctx, `
+		SELECT listed_sessions.chat_session_id,
+		       listed_sessions.chat_logs_count,
+		       listed_sessions.memories_count,
+		       listed_sessions.kg_triples_count,
+		       listed_sessions.last_activity
+		FROM (
+			SELECT sid.chat_session_id,
+			       COALESCE(cl.chat_logs_count, 0) AS chat_logs_count,
+			       COALESCE(mem.memories_count, 0) AS memories_count,
+			       COALESCE(kg.kg_triples_count, 0) AS kg_triples_count,
+			       NULLIF(MAX(
+			           COALESCE(cl.last_activity, ''),
+			           COALESCE(mem.last_activity, ''),
+			           COALESCE(kg.last_activity, '')
+			       ), '') AS last_activity
+			FROM (
+				SELECT chat_session_id FROM chat_logs
+				UNION
+				SELECT chat_session_id FROM memories
+				UNION
+				SELECT chat_session_id FROM kg_triples
+			) sid
+			LEFT JOIN (
+				SELECT chat_session_id, COUNT(*) AS chat_logs_count, MAX(created_at) AS last_activity
+				FROM chat_logs GROUP BY chat_session_id
+			) cl ON cl.chat_session_id = sid.chat_session_id
+			LEFT JOIN (
+				SELECT chat_session_id, COUNT(*) AS memories_count, MAX(created_at) AS last_activity
+				FROM memories GROUP BY chat_session_id
+			) mem ON mem.chat_session_id = sid.chat_session_id
+			LEFT JOIN (
+				SELECT chat_session_id, COUNT(*) AS kg_triples_count, MAX(created_at) AS last_activity
+				FROM kg_triples GROUP BY chat_session_id
+			) kg ON kg.chat_session_id = sid.chat_session_id
+		) listed_sessions
+		ORDER BY listed_sessions.last_activity IS NULL ASC, listed_sessions.last_activity DESC, listed_sessions.chat_session_id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SessionSummary
+	for rows.Next() {
+		var item SessionSummary
+		var lastActivity *string
+		if err := rows.Scan(&item.ChatSessionID, &item.ChatLogsCount, &item.MemoriesCount,
+			&item.KGTriplesCount, &lastActivity); err != nil {
+			return nil, err
+		}
+		if lastActivity != nil {
+			parsed, err := parseD1Time(*lastActivity)
+			if err != nil {
+				return nil, err
+			}
+			item.LastActivity = parsed
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
+
+// ---------------------------------------------------------------------------
+// not yet implemented
+// ---------------------------------------------------------------------------
 
 func (s *d1Store) GetResumePack(context.Context, string, string) (*ResumePack, error) {
 	return nil, errD1Unimplemented
@@ -313,6 +626,24 @@ func d1NullableString(v string) any {
 func d1DerefString(v *string) string {
 	if v == nil {
 		return ""
+	}
+	return *v
+}
+
+// d1BoolValue renders a Go bool as the SQLite integer the canonical schema uses
+// for boolean columns.
+func d1BoolValue(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// d1DerefInt64 renders a NULL integer column as 0, matching how the MariaDB path
+// reads nullable integer columns into plain int fields.
+func d1DerefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
 	}
 	return *v
 }

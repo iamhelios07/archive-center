@@ -23,7 +23,7 @@
 -- Global maintenance lease. A reset holds this lease with a monotonic fencing
 -- token so a resumed or concurrent worker cannot act on a stale claim.
 CREATE TABLE IF NOT EXISTS "d1_maintenance_lease" (
-    "lease_name"    TEXT PRIMARY KEY,
+    "lease_name"    TEXT PRIMARY KEY NOT NULL,
     "holder"        TEXT,
     "fencing_token" INTEGER NOT NULL DEFAULT 0,
     "acquired_at"   TEXT,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS "d1_reset_epoch" (
 -- over the child-first allowlist; each committed chunk advances them so a
 -- restart continues instead of restarting or double-deleting.
 CREATE TABLE IF NOT EXISTS "d1_reset_runs" (
-    "reset_run_id"   TEXT PRIMARY KEY,
+    "reset_run_id"   TEXT PRIMARY KEY NOT NULL,
     "epoch"          INTEGER NOT NULL,
     "status"         TEXT NOT NULL CHECK ("status" IN ('running', 'purging_vectors', 'completed', 'failed')),
     "table_index"    INTEGER NOT NULL DEFAULT 0,

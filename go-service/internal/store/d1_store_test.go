@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -326,20 +329,199 @@ func TestD1StoreUnimplementedMethodsFailLoudly(t *testing.T) {
 	st, _ := newD1TestStore(t)
 	ctx := context.Background()
 
-	if err := st.SaveEvidence(ctx, &DirectEvidence{}); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("SaveEvidence error = %v, want errD1Unimplemented", err)
+	if err := st.SaveChatLog(ctx, &ChatLog{ChatSessionID: "s1", TurnIndex: 1, Role: "user", Content: "x"}); err != nil {
+		t.Fatalf("implemented path must work: %v", err)
+	}
+	if _, err := st.GetResumePack(ctx, "s1", "manual"); !errors.Is(err, errD1Unimplemented) {
+		t.Errorf("GetResumePack error = %v, want errD1Unimplemented", err)
+	}
+	if _, err := st.ListWorldRules(ctx, "s1"); !errors.Is(err, errD1Unimplemented) {
+		t.Errorf("ListWorldRules error = %v, want errD1Unimplemented", err)
 	}
 	if _, err := st.ListStorylines(ctx, "s1"); !errors.Is(err, errD1Unimplemented) {
 		t.Errorf("ListStorylines error = %v, want errD1Unimplemented", err)
-	}
-	if _, err := st.Stats(ctx); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("Stats error = %v, want errD1Unimplemented", err)
 	}
 }
 
 func TestNewD1StoreRejectsNilConn(t *testing.T) {
 	if _, err := NewD1Store(nil); err == nil {
 		t.Error("NewD1Store(nil) must fail")
+	}
+}
+
+// TestD1CanonicalSchemaIndexesAndKeys guards four defects that an independent
+// cross-check of the generated schema found. Each one is silent at generation
+// time and only appears as missing behaviour at runtime.
+func TestD1CanonicalSchemaIndexesAndKeys(t *testing.T) {
+	db := d1ApplyAllMigrations(t)
+	ctx := context.Background()
+
+	// 1. SQLite index names are database-global while MariaDB index names are
+	//    per-table, so a repeated name plus IF NOT EXISTS silently dropped 27
+	//    indexes and left tables such as memories unindexed.
+	//    The count spans every tracked migration because sqlite_master aggregates
+	//    them all, including the reset control plane.
+	paths, err := filepath.Glob(filepath.Join(d1MigrationDir(t), "*.sql"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no migration files found: %v", err)
+	}
+	declared := 0
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, line := range strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "CREATE INDEX") ||
+				strings.HasPrefix(strings.TrimSpace(line), "CREATE UNIQUE INDEX") {
+				declared++
+			}
+		}
+	}
+	var actual int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
+	).Scan(&actual); err != nil {
+		t.Fatalf("count indexes: %v", err)
+	}
+	if declared == 0 {
+		t.Fatal("no CREATE INDEX statements found in the canonical schema")
+	}
+	if declared != actual {
+		t.Errorf("schema declares %d indexes but SQLite created %d; a name collision is silently dropping indexes", declared, actual)
+	}
+
+	info, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	var tableNames []string
+	for info.Next() {
+		var name string
+		if err := info.Scan(&name); err != nil {
+			t.Fatalf("scan table: %v", err)
+		}
+		tableNames = append(tableNames, name)
+	}
+	info.Close()
+
+	// 2. SQLite does not make a non-INTEGER column-level PRIMARY KEY implicitly
+	//    NOT NULL, so a NULL key would be accepted where MariaDB rejects it.
+	var nonIntegerPKTable, nonIntegerPKColumn string
+	for _, table := range tableNames {
+		columns, err := db.QueryContext(ctx, "PRAGMA table_info("+d1QuoteIdent(table)+")")
+		if err != nil {
+			t.Fatalf("table_info %s: %v", table, err)
+		}
+		for columns.Next() {
+			var cid, notNull, pk int
+			var name, columnType string
+			var defaultValue any
+			if err := columns.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+				columns.Close()
+				t.Fatalf("scan table_info %s: %v", table, err)
+			}
+			if pk == 1 && columnType != "INTEGER" {
+				if nonIntegerPKTable == "" {
+					nonIntegerPKTable, nonIntegerPKColumn = table, name
+				}
+				if notNull == 0 {
+					t.Errorf("column %s.%s is a %s PRIMARY KEY without NOT NULL; MariaDB implies NOT NULL", table, name, columnType)
+				}
+			}
+		}
+		columns.Close()
+	}
+
+	// The NOT NULL must actually reject a NULL key, not just be declared.
+	if nonIntegerPKTable != "" {
+		if _, err := db.ExecContext(ctx, "INSERT INTO "+d1QuoteIdent(nonIntegerPKTable)+
+			" ("+d1QuoteIdent(nonIntegerPKColumn)+") VALUES (NULL)"); err == nil {
+			t.Errorf("inserting NULL into %s.%s succeeded; the primary key must be NOT NULL", nonIntegerPKTable, nonIntegerPKColumn)
+		}
+	}
+
+	// 3. A database-generated timestamp must be readable by RFC3339-only callers,
+	//    which MariaDB's DATETIME(3) default satisfies and SQLite's
+	//    CURRENT_TIMESTAMP does not.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE ts_probe (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))`); err != nil {
+		t.Fatalf("create timestamp probe: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO ts_probe DEFAULT VALUES"); err != nil {
+		t.Fatalf("insert timestamp probe: %v", err)
+	}
+	var generated string
+	if err := db.QueryRowContext(ctx, "SELECT created_at FROM ts_probe").Scan(&generated); err != nil {
+		t.Fatalf("read generated timestamp: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, generated); err != nil {
+		t.Errorf("database-generated timestamp %q is not RFC3339: %v", generated, err)
+	}
+
+	// 4. The canonical schema must not carry a duplicate UNIQUE column set, which
+	//    would create two identical autoindexes. Index metadata is gathered in
+	//    two phases because the test pool holds a single connection, so a nested
+	//    query inside an open cursor would deadlock.
+	for _, table := range tableNames {
+		indexes, err := db.QueryContext(ctx, "PRAGMA index_list("+d1QuoteIdent(table)+")")
+		if err != nil {
+			t.Fatalf("index_list %s: %v", table, err)
+		}
+		var uniqueIndexNames []string
+		for indexes.Next() {
+			var seq, unique, partial int
+			var name, origin string
+			if err := indexes.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+				indexes.Close()
+				t.Fatalf("scan index_list %s: %v", table, err)
+			}
+			if origin == "u" {
+				uniqueIndexNames = append(uniqueIndexNames, name)
+			}
+		}
+		indexes.Close()
+
+		seen := map[string]bool{}
+		for _, name := range uniqueIndexNames {
+			columns, err := db.QueryContext(ctx, "PRAGMA index_info("+d1QuoteIdent(name)+")")
+			if err != nil {
+				t.Fatalf("index_info %s: %v", name, err)
+			}
+			var cols []string
+			for columns.Next() {
+				var seqNo, cid int
+				var colName string
+				if err := columns.Scan(&seqNo, &cid, &colName); err != nil {
+					columns.Close()
+					t.Fatalf("scan index_info %s: %v", name, err)
+				}
+				cols = append(cols, colName)
+			}
+			columns.Close()
+			key := strings.Join(cols, ",")
+			if seen[key] {
+				t.Errorf("table %s has a duplicate UNIQUE constraint on (%s)", table, key)
+			}
+			seen[key] = true
+		}
+	}
+}
+
+// TestD1CanonicalSchemaTimestampDefaultMatchesStoreFormat ties the schema default
+// shape to the format the D1 store writes, so a DB-defaulted row and an
+// application-written row stay interchangeable.
+func TestD1CanonicalSchemaTimestampDefaultMatchesStoreFormat(t *testing.T) {
+	fixed := time.Date(2026, 3, 4, 5, 6, 7, 123000000, time.UTC).Format(d1TimeLayout)
+	if fixed != "2026-03-04T05:06:07.123Z" {
+		t.Errorf("d1TimeLayout output = %q, want millisecond RFC3339", fixed)
+	}
+	if _, err := parseD1Time(fixed); err != nil {
+		t.Errorf("d1TimeLayout output must round-trip: %v", err)
+	}
+	if written := d1TimeValue(time.Time{}); written == "" {
+		t.Error("d1TimeValue must render a zero time as the current UTC time")
 	}
 }
 

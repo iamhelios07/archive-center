@@ -80,6 +80,7 @@ func generate(migrationsDir string) ([]byte, schemaStats, error) {
 			}
 		}
 	}
+	schema.normalise()
 	if err := schema.validate(); err != nil {
 		return nil, schemaStats{}, fmt.Errorf("validation: %w", err)
 	}
@@ -210,6 +211,11 @@ type foreignKey struct {
 type indexDef struct {
 	name string
 	cols []string
+	// emitName is the name actually emitted. MariaDB index names are unique only
+	// per table, while SQLite index names are database-global, so a repeated
+	// MariaDB name would make the second CREATE INDEX a silent no-op once
+	// IF NOT EXISTS is present. normalise() fills this in.
+	emitName string
 }
 
 type table struct {
@@ -411,6 +417,65 @@ func translateCheckRegexp(check string) (string, error) {
 	return out, nil
 }
 
+// normalise removes constraints that become duplicates after the ALTER merge and
+// resolves SQLite's database-global index namespace.
+func (s *schema) normalise() {
+	for _, name := range s.order {
+		t := s.tables[name]
+
+		// A table can carry the same UNIQUE constraint twice, for example when an
+		// inline UNIQUE KEY is later re-added by ALTER TABLE ADD UNIQUE INDEX.
+		// SQLite would then create two identical autoindexes.
+		seenUnique := map[string]bool{}
+		uniques := make([]string, 0, len(t.uniques))
+		for _, u := range t.uniques {
+			if !seenUnique[u] {
+				seenUnique[u] = true
+				uniques = append(uniques, u)
+			}
+		}
+		t.uniques = uniques
+
+		seenIndex := map[string]bool{}
+		indexes := make([]indexDef, 0, len(t.indexes))
+		for _, idx := range t.indexes {
+			key := idx.name + "(" + strings.Join(idx.cols, ",") + ")"
+			if !seenIndex[key] {
+				seenIndex[key] = true
+				indexes = append(indexes, idx)
+			}
+		}
+		t.indexes = indexes
+	}
+
+	// SQLite index names are database-global. MariaDB reuses short names such as
+	// idx_session_turn across many tables, so without disambiguation the second
+	// CREATE INDEX IF NOT EXISTS would be a silent no-op and the table would end
+	// up with no index at all.
+	counts := map[string]int{}
+	for _, name := range s.order {
+		for _, idx := range s.tables[name].indexes {
+			counts[idx.name]++
+		}
+	}
+	used := map[string]bool{}
+	for _, name := range s.order {
+		t := s.tables[name]
+		for i := range t.indexes {
+			base := t.indexes[i].name
+			final := base
+			if counts[base] > 1 {
+				final = name + "_" + base
+			}
+			for used[final] {
+				final += "_alt"
+			}
+			used[final] = true
+			t.indexes[i].emitName = final
+		}
+	}
+}
+
 // hasKeyword reports whether an upper-cased clause starts with the given SQL
 // keyword followed by whitespace, an opening parenthesis, or an identifier
 // quote. Without the boundary check a column such as key_points_json would be
@@ -538,6 +603,7 @@ var (
 	reDefaultTrue   = regexp.MustCompile(`(?i)DEFAULT\s+TRUE\b`)
 	reSpace         = regexp.MustCompile(`\s+`)
 	reInlinePrimary = regexp.MustCompile(`(?i)\bPRIMARY\s+KEY\b`)
+	reNotNull       = regexp.MustCompile(`(?i)\bNOT\s+NULL\b`)
 	// MariaDB's ADD COLUMN ... AFTER col / FIRST has no SQLite equivalent;
 	// column order is not observable in SQLite, so the position is dropped.
 	reColumnPosition = regexp.MustCompile("(?i)\\s+(AFTER\\s+[A-Za-z0-9_`\"]+|FIRST)$")
@@ -584,13 +650,25 @@ func normaliseType(def string) string {
 	def = reBoolType.ReplaceAllString(def, "INTEGER")
 	def = reIntType.ReplaceAllString(def, "INTEGER")
 
-	def = reCurrentTS.ReplaceAllString(def, "DEFAULT CURRENT_TIMESTAMP")
+	// MariaDB DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) carries millisecond
+	// precision. SQLite's CURRENT_TIMESTAMP yields a space-separated,
+	// second-precision string with no zone, which RFC3339-only readers in the
+	// Go backend reject, so rows created by the default would not round-trip.
+	// The default is therefore rendered as an RFC3339 UTC timestamp with
+	// milliseconds, matching what the D1 store writes explicitly.
+	def = reCurrentTS.ReplaceAllString(def, "DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
 	// MariaDB's ON UPDATE CURRENT_TIMESTAMP has no SQLite equivalent; the
 	// application owns updated_at values instead, so the attribute is dropped.
 	def = reOnUpdateTS.ReplaceAllString(def, "")
 	def = reDefaultFalse.ReplaceAllString(def, "DEFAULT 0")
 	def = reDefaultTrue.ReplaceAllString(def, "DEFAULT 1")
 	def = strings.TrimSpace(reSpace.ReplaceAllString(def, " "))
+	// SQLite does not make a non-INTEGER column-level PRIMARY KEY implicitly
+	// NOT NULL, unlike MariaDB. Without this an explicit NULL key would be
+	// accepted and duplicate NULL keys could coexist.
+	if reInlinePrimary.MatchString(def) && !reNotNull.MatchString(def) {
+		def += " NOT NULL"
+	}
 	return def
 }
 
@@ -723,10 +801,20 @@ func (s *schema) validate() error {
 	if len(s.tables) == 0 {
 		return fmt.Errorf("no tables parsed")
 	}
+	emitted := map[string]string{}
 	for _, name := range s.order {
 		t := s.tables[name]
 		if len(t.columns) == 0 {
 			return fmt.Errorf("table %s has no columns", name)
+		}
+		for _, idx := range t.indexes {
+			if idx.emitName == "" {
+				return fmt.Errorf("table %s index %s has no emit name", name, idx.name)
+			}
+			if previous, exists := emitted[idx.emitName]; exists {
+				return fmt.Errorf("index name %q collides between %s and %s", idx.emitName, previous, name)
+			}
+			emitted[idx.emitName] = name
 		}
 		for _, fk := range t.fks {
 			ref := s.tables[fk.refTable]
@@ -826,7 +914,7 @@ func (s *schema) render(paths []string) string {
 		if len(t.indexes) > 0 {
 			for _, idx := range t.indexes {
 				b.WriteString(fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (%s);\n",
-					quoteIdent(idx.name), quoteIdent(name), strings.Join(quoteAll(idx.cols), ", ")))
+					quoteIdent(idx.emitName), quoteIdent(name), strings.Join(quoteAll(idx.cols), ", ")))
 			}
 		}
 		b.WriteString("\n")

@@ -237,6 +237,20 @@ func d1Assign(dest, value any) error {
 		}
 		*target = text
 		return nil
+	case **int64:
+		// NULL stays distinguishable from 0 for optional numeric columns such as
+		// superseded_by_id and turn_anchor.
+		if value == nil {
+			*target = nil
+			return nil
+		}
+		n, err := d1ToInt64(value)
+		if err != nil {
+			return err
+		}
+		copied := n
+		*target = &copied
+		return nil
 	case *int64:
 		n, err := d1ToInt64(value)
 		if err != nil {
