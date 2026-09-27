@@ -67,7 +67,11 @@ milvus.db
 # Backup and release artifacts
 backup/
 release/
-deploy/
+# deploy/ holds local build/deploy output by default. The Cloudflare
+# deployment source tree (deploy/cloudflare/) is tracked on purpose, and its
+# own .gitignore excludes rendered configs, secrets, and node_modules.
+deploy/*
+!deploy/cloudflare/
 _dist/
 _dist-*/
 _release-builds/

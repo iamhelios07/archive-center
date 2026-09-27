@@ -1,0 +1,13 @@
+{
+  "name": "archive-center-cloudflare-worker",
+  "version": "4.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

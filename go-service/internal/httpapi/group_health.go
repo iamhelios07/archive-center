@@ -119,6 +119,39 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		checks["store_open_error"] = "none"
 	}
 
+	// Cloudflare profile: bootstrap-only until every parity gate lands. The
+	// profile must never report functional deployment readiness early.
+	if s.Cfg.IsCloudflareProfile() {
+		if strings.TrimSpace(s.Cfg.CloudflareBridgeURL) != "" && strings.TrimSpace(s.Cfg.CloudflareBridgeToken) != "" {
+			checks["cloudflare_bridge"] = "configured"
+		} else {
+			checks["cloudflare_bridge"] = "not_configured"
+		}
+		if s.Cfg.CloudflareProfileReady() {
+			checks["cloudflare_profile"] = "ready"
+			checks["cloudflare_parity"] = "complete"
+		} else {
+			checks["cloudflare_profile"] = "bootstrap_only"
+			checks["cloudflare_parity"] = "incomplete"
+			checks["ready_blocker"] = "cloudflare_parity_incomplete"
+			writeJSON(w, http.StatusServiceUnavailable, readyResponse{
+				Ready:                   false,
+				BackendInstanceID:       s.backendInstanceID(),
+				StoreReady:              false,
+				VectorReady:             false,
+				ReferenceVectorReady:    false,
+				ReferenceVectorDegraded: false,
+				RuntimeProfile:          string(s.Cfg.RuntimeProfile),
+				VectorMode:              string(s.Cfg.VectorMode),
+				Degraded:                true,
+				Mode:                    string(s.Cfg.Mode),
+				Checks:                  checks,
+				Timestamp:               time.Now().UTC().Format(time.RFC3339),
+			})
+			return
+		}
+	}
+
 	if s.Cfg.Readiness.MariaDBConfigured {
 		checks["mariadb"] = "configured"
 	} else {

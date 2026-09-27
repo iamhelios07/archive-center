@@ -1,0 +1,17 @@
+# Rendered deployment config must never be committed; it contains
+# account/resource identifiers supplied by the operator.
+wrangler.toml
+.wrangler/
+
+# Local secrets and tokens.
+.dev.vars
+.env
+.env.*
+
+# Dependencies and build output.
+node_modules/
+dist/
+
+# Logs and scratch state.
+*.log
+*.tmp

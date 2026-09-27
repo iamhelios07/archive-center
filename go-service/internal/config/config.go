@@ -29,6 +29,10 @@ const (
 	StoreModeFixtureShadow     StoreMode = "fixture_shadow"
 	StoreModeMariaDBReadShadow StoreMode = "mariadb_read_shadow"
 	StoreModeMariaDBAuthority  StoreMode = "mariadb_authority"
+	// StoreModeCloudflareAuthority is a Stage 2 bootstrap selector. Its D1
+	// implementation arrives in Stage 3; it must not be treated as a ready
+	// product authority before the parity gates are complete.
+	StoreModeCloudflareAuthority StoreMode = "cloudflare_authority"
 )
 
 // RuntimeProfile selects the deployment shape for 2.0.1 packages.
@@ -40,6 +44,9 @@ const (
 	RuntimeProfileVectorExternal    RuntimeProfile = "vector_external"
 	RuntimeProfileVectorLocalNative RuntimeProfile = "vector_local_native"
 	RuntimeProfileFullLocal         RuntimeProfile = "full_local"
+	// RuntimeProfileCloudflare selects the Container -> Worker -> D1/Vectorize
+	// deployment shape. It is explicit opt-in and remains unready until parity.
+	RuntimeProfileCloudflare RuntimeProfile = "cloudflare"
 )
 
 // VectorMode selects whether the vector accelerator is disabled, degraded, or
@@ -53,6 +60,8 @@ const (
 	VectorModeLocalNative VectorMode = "local_native"
 	VectorModeLocalProot  VectorMode = "local_proot"
 	VectorModeBundled     VectorMode = "bundled"
+	// VectorModeCloudflare selects the Worker-mediated Vectorize accelerator.
+	VectorModeCloudflare VectorMode = "cloudflare"
 )
 
 // Config holds the entire service configuration.
@@ -82,6 +91,15 @@ type Config struct {
 
 	// MariaDBDSN is used only when StoreMode is a MariaDB-backed mode.
 	MariaDBDSN string
+
+	// CloudflareBridgeURL is the virtual-host Worker bridge endpoint reached by
+	// the Container. It is not a Cloudflare API endpoint and contains no account
+	// or resource identifier.
+	CloudflareBridgeURL string
+
+	// CloudflareBridgeToken is the shared Container-to-Worker bridge secret.
+	// It is loaded only from the environment and never included in String().
+	CloudflareBridgeToken string
 
 	// MariaDBProductReadEnabled marks an explicit R2 product-read proof where
 	// read-only HTTP surfaces are allowed to use MariaDB as their selected
@@ -245,6 +263,8 @@ func Load() Config {
 			cfg.StoreMode = StoreModeMariaDBReadShadow
 		case string(StoreModeMariaDBAuthority):
 			cfg.StoreMode = StoreModeMariaDBAuthority
+		case string(StoreModeCloudflareAuthority):
+			cfg.StoreMode = StoreModeCloudflareAuthority
 		default:
 			cfg.StoreMode = StoreMode(strings.ToLower(v))
 		}
@@ -269,6 +289,8 @@ func Load() Config {
 	}
 
 	cfg.MariaDBDSN = os.Getenv("AC_MARIADB_DSN")
+	cfg.CloudflareBridgeURL = strings.TrimSpace(os.Getenv("AC_CLOUDFLARE_BRIDGE_URL"))
+	cfg.CloudflareBridgeToken = os.Getenv("AC_CLOUDFLARE_BRIDGE_TOKEN")
 	cfg.StoreFixtureDir = os.Getenv("AC_STORE_FIXTURE_DIR")
 	cfg.Readiness.MariaDBConfigured = cfg.MariaDBDSN != ""
 	cfg.ChromaEndpoint = os.Getenv("AC_CHROMA_ENDPOINT")
@@ -358,6 +380,8 @@ func parseRuntimeProfile(raw string) RuntimeProfile {
 		return RuntimeProfileFullLocal
 	case string(RuntimeProfileCoreLite):
 		return RuntimeProfileCoreLite
+	case string(RuntimeProfileCloudflare):
+		return RuntimeProfileCloudflare
 	default:
 		return RuntimeProfile(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -377,6 +401,8 @@ func parseVectorMode(raw string) VectorMode {
 		return VectorModeBundled
 	case string(VectorModeFallback):
 		return VectorModeFallback
+	case string(VectorModeCloudflare):
+		return VectorModeCloudflare
 	default:
 		return VectorMode(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -392,6 +418,8 @@ func defaultVectorMode(profile RuntimeProfile) VectorMode {
 		return VectorModeLocalNative
 	case RuntimeProfileFullLocal:
 		return VectorModeBundled
+	case RuntimeProfileCloudflare:
+		return VectorModeCloudflare
 	default:
 		return VectorModeFallback
 	}
@@ -426,8 +454,8 @@ func (c Config) Validate() error {
 	if (c.Mode == ModeLive || c.Mode == ModeCutover) && (c.StoreMode != StoreModeMariaDBAuthority || strings.TrimSpace(c.MariaDBDSN) == "") {
 		return fmt.Errorf("config: mode %q requires AC_STORE_MODE=%q and AC_MARIADB_DSN", c.Mode, StoreModeMariaDBAuthority)
 	}
-	if c.StoreMode != StoreModeNoop && c.StoreMode != StoreModeDualShadow && c.StoreMode != StoreModeMariaDBShadow && c.StoreMode != StoreModeFixtureShadow && c.StoreMode != StoreModeMariaDBReadShadow && c.StoreMode != StoreModeMariaDBAuthority {
-		return fmt.Errorf("config: store_mode %q is not allowed in this slice; only %q, %q, %q, %q, %q, and %q are allowed", c.StoreMode, StoreModeNoop, StoreModeDualShadow, StoreModeMariaDBShadow, StoreModeFixtureShadow, StoreModeMariaDBReadShadow, StoreModeMariaDBAuthority)
+	if c.StoreMode != StoreModeNoop && c.StoreMode != StoreModeDualShadow && c.StoreMode != StoreModeMariaDBShadow && c.StoreMode != StoreModeFixtureShadow && c.StoreMode != StoreModeMariaDBReadShadow && c.StoreMode != StoreModeMariaDBAuthority && c.StoreMode != StoreModeCloudflareAuthority {
+		return fmt.Errorf("config: store_mode %q is not allowed", c.StoreMode)
 	}
 	if (c.StoreMode == StoreModeMariaDBShadow || c.StoreMode == StoreModeMariaDBReadShadow || c.StoreMode == StoreModeMariaDBAuthority) && strings.TrimSpace(c.MariaDBDSN) == "" {
 		return fmt.Errorf("config: store_mode %q requires AC_MARIADB_DSN", c.StoreMode)
@@ -437,6 +465,17 @@ func (c Config) Validate() error {
 	}
 	if c.StoreMode == StoreModeFixtureShadow && strings.TrimSpace(c.StoreFixtureDir) == "" {
 		return fmt.Errorf("config: store_mode %q requires AC_STORE_FIXTURE_DIR", c.StoreMode)
+	}
+	if c.RuntimeProfile == RuntimeProfileCloudflare {
+		if c.StoreMode != StoreModeCloudflareAuthority || c.VectorMode != VectorModeCloudflare {
+			return fmt.Errorf("config: runtime_profile %q requires store_mode %q and vector_mode %q", RuntimeProfileCloudflare, StoreModeCloudflareAuthority, VectorModeCloudflare)
+		}
+		if strings.TrimSpace(c.CloudflareBridgeURL) == "" || strings.TrimSpace(c.CloudflareBridgeToken) == "" {
+			return fmt.Errorf("config: runtime_profile %q requires AC_CLOUDFLARE_BRIDGE_URL and AC_CLOUDFLARE_BRIDGE_TOKEN", RuntimeProfileCloudflare)
+		}
+	}
+	if c.StoreMode == StoreModeCloudflareAuthority && c.RuntimeProfile != RuntimeProfileCloudflare {
+		return fmt.Errorf("config: store_mode %q requires runtime_profile %q", StoreModeCloudflareAuthority, RuntimeProfileCloudflare)
 	}
 	if c.VectorRequiresEndpoint() && strings.TrimSpace(c.ChromaEndpoint) == "" {
 		return fmt.Errorf("config: vector_mode %q requires AC_CHROMA_ENDPOINT", c.VectorMode)
@@ -455,7 +494,7 @@ func (c Config) Validate() error {
 
 func isAllowedRuntimeProfile(profile RuntimeProfile) bool {
 	switch profile {
-	case RuntimeProfileClientOnly, RuntimeProfileCoreLite, RuntimeProfileVectorExternal, RuntimeProfileVectorLocalNative, RuntimeProfileFullLocal:
+	case RuntimeProfileClientOnly, RuntimeProfileCoreLite, RuntimeProfileVectorExternal, RuntimeProfileVectorLocalNative, RuntimeProfileFullLocal, RuntimeProfileCloudflare:
 		return true
 	default:
 		return false
@@ -464,7 +503,7 @@ func isAllowedRuntimeProfile(profile RuntimeProfile) bool {
 
 func isAllowedVectorMode(mode VectorMode) bool {
 	switch mode {
-	case VectorModeOff, VectorModeFallback, VectorModeExternal, VectorModeLocalNative, VectorModeLocalProot, VectorModeBundled:
+	case VectorModeOff, VectorModeFallback, VectorModeExternal, VectorModeLocalNative, VectorModeLocalProot, VectorModeBundled, VectorModeCloudflare:
 		return true
 	default:
 		return false
@@ -493,8 +532,32 @@ func (c Config) validateProfileVectorPair() error {
 		if c.VectorMode != VectorModeLocalNative && c.VectorMode != VectorModeLocalProot && c.VectorMode != VectorModeBundled {
 			return fmt.Errorf("config: runtime_profile %q requires a local vector mode", c.RuntimeProfile)
 		}
+	case RuntimeProfileCloudflare:
+		if c.VectorMode != VectorModeCloudflare {
+			return fmt.Errorf("config: runtime_profile %q requires vector_mode %q", c.RuntimeProfile, VectorModeCloudflare)
+		}
 	}
 	return nil
+}
+
+// IsCloudflareProfile reports whether this process is configured for the
+// Container-to-Worker Cloudflare topology.
+func (c Config) IsCloudflareProfile() bool {
+	return c.RuntimeProfile == RuntimeProfileCloudflare && c.StoreMode == StoreModeCloudflareAuthority && c.VectorMode == VectorModeCloudflare
+}
+
+// cloudflareParityComplete marks whether every C/V/O parity gate for the
+// Cloudflare profile has landed. Stage 2 ships only the runtime bootstrap and
+// the Worker bridge contract, so it stays false: the Cloudflare profile must
+// not be reported as a functional deployment until the remaining stages
+// implement D1 canonical parity, Vectorize semantic parity, and operator
+// parity, and flip this constant.
+const cloudflareParityComplete = false
+
+// CloudflareProfileReady reports whether the Cloudflare profile has passed
+// every parity gate and may advertise functional deployment readiness.
+func (c Config) CloudflareProfileReady() bool {
+	return c.IsCloudflareProfile() && cloudflareParityComplete
 }
 
 // VectorRequiresEndpoint reports whether this profile must have a ChromaDB

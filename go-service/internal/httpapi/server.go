@@ -188,6 +188,12 @@ func newStoreForConfig(cfg config.Config) (store.Store, error) {
 			return store.NewNoopStore(), err
 		}
 		return fixture, nil
+	case config.StoreModeCloudflareAuthority:
+		// Stage 2 bootstrap placeholder. The D1 store provider lands in
+		// Stage 3, so the Cloudflare profile must not accept canonical
+		// writes yet: usesShadowWriteStore() stays MariaDB-only and /ready
+		// reports the profile as bootstrap-only through the parity gate.
+		return store.NewNoopStore(), nil
 	default:
 		return store.NewNoopStore(), nil
 	}
