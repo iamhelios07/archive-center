@@ -137,6 +137,30 @@ Task #1 Stage 2: Cloudflare bridge와 runtime bootstrap 추가
 - normal turn, prepare-turn lorebook/persona/state/world, entity identity, rollback/reroll, explorer mutation, reference/canon data, session/worldline data와 operator-readable canonical records가 local과 같은 observable result를 낸다.
 - canonical write는 source revision/idempotency key와 outbox enqueue를 D1 transaction contract로 묶는다. MariaDB lock/upsert/last-insert-id SQL을 재사용하지 않으며 D1-compatible statement, deterministic IDs, retry policy를 사용한다.
 - `O` capability의 authorization/audit procedure는 Stage 5에서 완료하되, 그 data model과 atomic persistence contract는 이 단계에서 제공한다.
+- `admin_reset_runs` 등 reset control plane의 D1 영속 상태·cursor·epoch는 이 단계에서 schema와 contract로 확정한다. 아래 "D1 FK-safe resumable reset 설계 확정"을 따른다.
+
+### D1 FK-safe resumable reset 설계 확정
+
+MariaDB `ResetAll`은 한 연결에서 `SET FOREIGN_KEY_CHECKS=0` 후 72개 테이블을 한 트랜잭션의 `DELETE FROM`으로 지운다. D1은 foreign key를 기본 강제하고 `batch()`로 원자성을 제공하지만, 대량 수정은 실행 한도를 넘길 수 있어 이 방식을 그대로 이식할 수 없다. 따라서 D1은 별도의 재개 가능한 reset state machine으로 구현한다.
+
+실측 검증(SQLite 3.45.3, 저장소 의존성 `modernc.org/sqlite`와 동일 엔진)으로 확정한 제약:
+
+- **child-first allowlist** — SQLite는 `ON DELETE CASCADE`를 지원하므로 부모를 먼저 지우면 자식이 조용히 함께 삭제된다. allowlist는 `mariaAdminResetTables`와 같은 child-first 순서를 유지하고 모든 이름을 명시한다. `WITHOUT ROWID`는 지원되나 현재 migration에 사용 사례가 없다.
+- **bounded chunk + 커밋 cursor** — 1,000행을 커밋 단위 250행 4회로 나눠 삭제하는 것을 실측했고, cursor가 chunk마다 전진하므로 중단 후 재개가 가능하다. rowid/PK 범위 cursor를 쓰고 `OFFSET`을 쓰지 않는다.
+- **`sqlite_*` 내부 객체 제외** — allowlist는 `sqlite_sequence`, `sqlite_schema`, `sqlite_autoindex_*`를 절대 포함하지 않는다. `sqlite_sequence`는 AUTOINCREMENT 테이블이 없으면 존재하지 않으므로 이름을 하드코딩해 지우지 않는다.
+- **`sqlite_sequence`를 지우지 않는다** — MariaDB reset은 `TRUNCATE`가 아니라 `DELETE FROM`이므로 AUTO_INCREMENT 카운터가 보존된다. SQLite도 `DELETE FROM`이면 `sqlite_sequence`가 보존되어 id가 단조 증가한다. 반대로 sequence를 비우고 테이블이 비면 id가 1로 재시작해 parity가 깨진다.
+- **`sqlite_autoindex_*`는 삭제 불가** — constraint가 만든 내부 인덱스이며 schema 객체다.
+- **migration metadata 보존** — `mariaAdminResetTables`도 `schema_migrations`를 포함하지 않는다. Cloudflare reset도 migration/version metadata를 삭제 대상에서 제외한다.
+- **ID 단조성** — MariaDB `BIGINT UNSIGNED AUTO_INCREMENT` 60개 테이블은 id를 재사용하지 않는다. D1 schema는 해당 테이블에 `AUTOINCREMENT`를 명시해야 하며, plain `INTEGER PRIMARY KEY`는 전체 삭제 후 id를 재사용하므로 금지한다.
+
+state machine 계약:
+
+1. **전역 maintenance lease + fencing token** — reset 중에는 다른 writer가 canonical row를 쓰지 못한다. lease와 fencing token은 D1에 영속하며 Container 재시작에도 유지된다.
+2. **durable reset run record** — `admin_reset_runs`가 reset epoch, 대상 table allowlist 순서, 현재 table/index, 마지막 처리 key, 처리 행 수, 상태(`running`/`purging_vectors`/`completed`/`failed`), 오류, 재시도 횟수를 보관한다. 이 control-plane record는 application-data reset 범위에서 제외한다.
+3. **per-chunk 짧은 batch + cursor checkpoint** — 각 chunk는 D1 `batch()`로 원자적으로 커밋하고, 성공 시에만 cursor를 전진시킨다. 실패한 chunk는 재시도하며 이미 커밋된 chunk는 다시 지우지 않는다.
+4. **Vectorize purge와 epoch fence** — D1 삭제와 Vectorize purge는 원자적으로 커밋될 수 없다. reset epoch를 올리고 purge가 완료될 때까지 stale vector를 fence로 차단하며, purge/retry 상태를 D1에 영속해 재개한다. 완료 시에만 새 epoch의 데이터가 검색에 노출된다.
+5. **presentation은 파생** — 기존 `adminJobManager`는 process memory 전용이라 stateless Container에서 reset truth를 소유할 수 없다. `/admin/jobs`는 D1 reset run을 읽어 보여주는 presentation일 뿐이며 truth는 D1이다.
+6. **operator-visible semantics 유지** — 기존 `POST /admin/database-reset`은 confirmation token(`RESET_ARCHIVE_CENTER_DB`), `debug=true` 요구, authorization, audit 의미를 그대로 보존한다. 장시간 reset에서 진행 중 상태를 반환하더라도 UI가 `completed`일 때만 캐시를 비우고 성공을 표시하도록 provider-aware하게 맞춘다.
 
 ### 검증
 
@@ -149,6 +173,7 @@ git diff --check
 ```
 
 - bridge mock으로 D1 batch/transaction failure, idempotent replay, source revision conflict, rollback, JSON/current projection, session isolation을 검증한다.
+- D1은 SQLite 엔진이므로, 저장소에 이미 있는 `modernc.org/sqlite` 의존성으로 동일 엔진 로컬 harness를 만들어 D1 dialect SQL(통합 schema, FK 강제, `batch()` 원자성, chunk cursor 재개, `AUTOINCREMENT` id 단조성, JSON predicate)을 검증한다. `PRAGMA foreign_keys=ON`을 명시해 D1과 같은 조건으로 실행한다.
 - MariaDB Store unit tests와 local runtime config tests가 그대로 통과함을 확인한다.
 
 ### 커밋
@@ -222,6 +247,7 @@ Task #1 Stage 4: Vectorize semantic parity 추가
 ### 변경 내용
 
 - reset, snapshot/export, migration/stitch/worldline, source discovery, canon registry/pack, repair/recovery와 maintenance job을 Cloudflare에서 동등하게 수행한다. Worker-admin authorization, audit, confirmation, idempotent job state, D1 recovery and Vectorize reconciliation을 구현한다.
+- reset operator procedure는 Stage 3의 "D1 FK-safe resumable reset 설계 확정"을 따른다. confirmation/authorization/audit semantics를 보존하고, durable reset run 기반 start/status/resume API와 UI의 provider-aware 완료 처리를 완성한다.
 - Container artifact는 Go backend를 stateless로 실행한다. product data, migration state, queue/job state, user setting은 image/layer/local filesystem에 두지 않는다.
 - deploy renderer는 account/resource IDs, routes, secrets를 ignored/protected input에서 temporary config로만 materialize한다. README/runbook은 normal deployment와 admin recovery/migration procedures, local compatibility와 remote-test boundary를 구분해 문서화한다.
 
