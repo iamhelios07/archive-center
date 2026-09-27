@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/risulongmemory/archive-center-go/internal/config"
+	"github.com/risulongmemory/archive-center-go/internal/store"
 )
 
 func newCloudflareTestConfig() config.Config {
@@ -14,7 +17,9 @@ func newCloudflareTestConfig() config.Config {
 	cfg.RuntimeProfile = config.RuntimeProfileCloudflare
 	cfg.StoreMode = config.StoreModeCloudflareAuthority
 	cfg.VectorMode = config.VectorModeCloudflare
-	cfg.CloudflareBridgeURL = "http://archive-center-bridge.internal"
+	// A loopback port with nothing listening: the bridge client validates the URL
+	// at construction, and a write fails immediately instead of waiting on DNS.
+	cfg.CloudflareBridgeURL = "http://127.0.0.1:9"
 	cfg.CloudflareBridgeToken = "bridge-token"
 	return cfg
 }
@@ -87,7 +92,11 @@ func TestHandleReadyCloudflareProfileReportsMissingBridgeConfig(t *testing.T) {
 	}
 }
 
-func TestNewServerCloudflareAuthorityKeepsWriteGuardClosed(t *testing.T) {
+// TestNewServerCloudflareAuthorityWiresD1Provider verifies that the Cloudflare
+// profile now opens the real D1 provider and that the canonical write capability
+// is provider-neutral: the write and reset routes must not be gated on MariaDB
+// mode names alone.
+func TestNewServerCloudflareAuthorityWiresD1Provider(t *testing.T) {
 	cfg := newCloudflareTestConfig()
 	srv := NewServer(cfg)
 
@@ -95,13 +104,47 @@ func TestNewServerCloudflareAuthorityKeepsWriteGuardClosed(t *testing.T) {
 		t.Fatal("Store should not be nil")
 	}
 	if srv.StoreOpenError != nil {
-		t.Fatalf("StoreOpenError = %v, want nil (noop bootstrap placeholder)", srv.StoreOpenError)
+		t.Fatalf("StoreOpenError = %v, want nil for a fully configured cloudflare profile", srv.StoreOpenError)
 	}
-	if srv.usesShadowWriteStore() {
-		t.Error("usesShadowWriteStore() must stay false for the Stage 2 cloudflare bootstrap; the D1 store lands in Stage 3")
+	if !srv.usesShadowWriteStore() {
+		t.Error("the cloudflare D1 provider must expose the canonical write capability")
+	}
+	if !srv.hasCanonicalWriteCapability() {
+		t.Error("hasCanonicalWriteCapability() must be true for cloudflare_authority")
+	}
+	if source := srv.storeWriteSource(); source != "cloudflare_d1" {
+		t.Errorf("storeWriteSource() = %q, want cloudflare_d1", source)
 	}
 	if _, ok := srv.Store.(storeShadowReporterForTest); ok {
-		t.Error("cloudflare bootstrap store must not pose as a shadow status reporter")
+		t.Error("the D1 provider must not pose as a shadow status reporter")
+	}
+
+	// The provided store must be the D1 provider, not a silent no-op: a write
+	// against an unreachable bridge fails loudly, whereas the no-op store would
+	// return nil and hide the missing transport.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Store.SaveChatLog(ctx, &store.ChatLog{
+		ChatSessionID: "s1", TurnIndex: 1, Role: "user", Content: "x",
+	}); err == nil {
+		t.Error("a write through an unreachable D1 bridge must fail, not silently succeed")
+	}
+}
+
+// TestNewServerCloudflareAuthorityWithoutBridgeFailsLoudly verifies that an
+// unwired Cloudflare profile reports an open error instead of falling back to a
+// no-op store that would appear to persist writes.
+func TestNewServerCloudflareAuthorityWithoutBridgeFailsLoudly(t *testing.T) {
+	cfg := newCloudflareTestConfig()
+	cfg.CloudflareBridgeURL = ""
+	cfg.CloudflareBridgeToken = ""
+
+	srv := NewServer(cfg)
+	if srv.StoreOpenError == nil {
+		t.Fatal("a cloudflare profile without bridge configuration must report an open error")
+	}
+	if err := srv.ValidateRuntimeDependencies(context.Background()); err == nil {
+		t.Error("startup preflight must reject an unusable cloudflare authority store")
 	}
 }
 

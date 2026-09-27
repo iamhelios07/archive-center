@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/risulongmemory/archive-center-go/internal/cloudflarebridge"
 	"github.com/risulongmemory/archive-center-go/internal/config"
 	"github.com/risulongmemory/archive-center-go/internal/diagnostics"
 	"github.com/risulongmemory/archive-center-go/internal/store"
@@ -63,8 +64,16 @@ type Server struct {
 // service advertises readiness. Chroma Health checks both the configured API
 // heartbeat and collection endpoint without deleting existing data.
 func (s *Server) ValidateRuntimeDependencies(ctx context.Context) error {
-	if s.StoreOpenError != nil && s.Cfg.StoreMode == config.StoreModeMariaDBAuthority {
-		return fmt.Errorf("mariadb startup preflight failed: %w", s.StoreOpenError)
+	// A canonical authority whose store could not open must fail startup rather
+	// than serve requests against a no-op store. The Cloudflare D1 provider is an
+	// authority too, so it is covered by the same gate.
+	if s.StoreOpenError != nil {
+		switch s.Cfg.StoreMode {
+		case config.StoreModeMariaDBAuthority:
+			return fmt.Errorf("mariadb startup preflight failed: %w", s.StoreOpenError)
+		case config.StoreModeCloudflareAuthority:
+			return fmt.Errorf("cloudflare d1 startup preflight failed: %w", s.StoreOpenError)
+		}
 	}
 	if !s.Cfg.ChromaEnabled || strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
 		return nil
@@ -189,23 +198,53 @@ func newStoreForConfig(cfg config.Config) (store.Store, error) {
 		}
 		return fixture, nil
 	case config.StoreModeCloudflareAuthority:
-		// Stage 2 bootstrap placeholder. The D1 store provider lands in
-		// Stage 3, so the Cloudflare profile must not accept canonical
-		// writes yet: usesShadowWriteStore() stays MariaDB-only and /ready
-		// reports the profile as bootstrap-only through the parity gate.
-		return store.NewNoopStore(), nil
+		// The Cloudflare profile reaches D1 only through the Worker bridge. An
+		// unusable bridge configuration is reported as a loud open error rather
+		// than falling back to a no-op store, so an unwired deployment cannot
+		// appear to persist canonical writes.
+		client, err := cloudflarebridge.NewClient(cfg.CloudflareBridgeURL, cfg.CloudflareBridgeToken, 0)
+		if err != nil {
+			return store.NewNoopStore(), fmt.Errorf("cloudflare bridge client: %w", err)
+		}
+		conn, err := store.NewD1BridgeConn(client)
+		if err != nil {
+			return store.NewNoopStore(), err
+		}
+		d1, err := store.NewD1Store(conn)
+		if err != nil {
+			return store.NewNoopStore(), err
+		}
+		return d1, nil
 	default:
 		return store.NewNoopStore(), nil
 	}
 }
 
-func (s *Server) usesShadowWriteStore() bool {
+// hasCanonicalWriteCapability reports whether the selected provider can own
+// canonical writes.
+//
+// It replaces a MariaDB-only mode list: the Cloudflare D1 provider is a
+// first-class canonical authority, so keying the write and reset routes off
+// MariaDB mode names would silently lock Cloudflare out of them.
+func (s *Server) hasCanonicalWriteCapability() bool {
 	if errors.Is(s.StoreOpenError, store.ErrNotEnabled) {
 		return false
 	}
-	return s.Cfg.StoreMode == config.StoreModeDualShadow ||
-		s.Cfg.StoreMode == config.StoreModeMariaDBShadow ||
-		s.Cfg.StoreMode == config.StoreModeMariaDBAuthority
+	switch s.Cfg.StoreMode {
+	case config.StoreModeDualShadow,
+		config.StoreModeMariaDBShadow,
+		config.StoreModeMariaDBAuthority,
+		config.StoreModeCloudflareAuthority:
+		return true
+	default:
+		return false
+	}
+}
+
+// usesShadowWriteStore keeps the original call-site name while delegating to the
+// provider-neutral capability check.
+func (s *Server) usesShadowWriteStore() bool {
+	return s.hasCanonicalWriteCapability()
 }
 
 func (s *Server) storeWriteSource() string {
@@ -216,6 +255,8 @@ func (s *Server) storeWriteSource() string {
 		return "mariadb_shadow"
 	case config.StoreModeDualShadow:
 		return "dual_shadow"
+	case config.StoreModeCloudflareAuthority:
+		return "cloudflare_d1"
 	default:
 		return "shadow"
 	}
