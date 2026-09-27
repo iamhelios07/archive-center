@@ -90,36 +90,43 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 
 ## 잠정 단계
 
-- **Stage 1 — Cloudflare provider contract와 D1 최소 canonical slice**
-  - provider-neutral config/readiness contract, Worker bridge API, D1 migration 및 normal turn canonical persistence/read path를 구현한다.
+- **Stage 1 — MariaDB capability inventory와 D1 범위 결정**
+  - `store.Store` base/optional interfaces, MariaDB 구현·schema table·transaction/SQL semantics, HTTP/runtime consumer를 전수 매핑한다.
+  - 각 capability를 Cloudflare 첫 release의 required / deferred / unsupported profile guard / 후속 task 후보로 분류하고, 이 결과가 승인되기 전에는 D1 vertical slice를 확정하지 않는다.
+- **Stage 2 — Cloudflare provider contract와 Worker bridge bootstrap**
+  - Stage 1에서 확정한 required capability에 맞춰 provider-neutral config/readiness contract와 Worker bridge API를 구현한다.
   - local provider regression과 D1 bridge/store contract·idempotency·session isolation을 검증한다.
-- **Stage 2 — Vectorize accelerator와 recall consistency**
+- **Stage 3 — D1 canonical vertical slice**
+  - 승인된 inventory 결과에 따라 D1 migration 및 required canonical persistence/read path를 구현한다.
+  - D1 Store capability classification, local provider regression, D1 bridge/store contract·idempotency·session isolation을 검증한다.
+- **Stage 4 — Vectorize accelerator와 recall consistency**
   - Vectorize provider, canonical outbox lifecycle, recent-memory fallback, ID deduplication, delete/rebuild를 구현한다.
   - eventual consistency, failure/retry, D1 hydration, rebuild 및 local Chroma compatibility를 검증한다.
-- **Stage 3 — Cloudflare deployment vertical slice와 운영 surface**
-  - Worker/Container artifacts, bindings, provider-neutral health/readiness, local development/build flow를 구현한다.
-  - artifact configuration review, container restart persistence boundary, local smoke 및 선택적 remote integration test를 검증한다.
-- **Stage 4 — 호환성·문서화·release readiness**
-  - MariaDB/Chroma regression, D1/Vectorize contracts, deployment/migration procedure, test limitations을 정리한다.
-  - full test suite, syntax/config checks, diff review와 final acceptance evidence를 검증한다.
+- **Stage 5 — Cloudflare deployment vertical slice·호환성·문서화**
+  - Worker/Container artifacts, bindings, provider-neutral health/readiness, deployment/migration procedure를 구현·문서화한다.
+  - artifact configuration review, container restart persistence boundary, full regression, local smoke 및 선택적 remote integration test를 검증한다.
 
 ## 검증 계획
 
 ### 단계별 검증
 
 - Stage 1
-  - `go test ./internal/config ./internal/store ./internal/httpapi -count=1`
-  - D1 bridge mock contract, canonical persistence, idempotency, rollback/session isolation tests
+  - `store.go`, `mariadb*.go`, MariaDB migration/schema, runtime configuration과 HTTP consumer의 static inventory를 상호 대조한다.
+  - `cd go-service; go test ./internal/store ./internal/httpapi -count=1`로 inventory 기준선이 되는 local behavior를 확인한다.
+  - capability별 consumer, canonical table, MariaDB-specific SQL/transaction assumption, D1 disposition이 빠짐없이 기록되었는지 review한다.
 - Stage 2
+  - `go test ./internal/config ./internal/store ./internal/httpapi ./internal/cloudflarebridge -count=1`
+  - D1 bridge mock contract, configuration/readiness, idempotency, session isolation tests
+- Stage 3
+  - `go test ./internal/store ./internal/httpapi ./internal/config -count=1`
+  - 승인된 capability matrix의 D1 persistence/read path, idempotency, rollback/session isolation tests
+- Stage 4
   - `go test ./internal/vector ./internal/httpapi -count=1`
   - Vectorize outbox retry, D1 fallback, deduplication, delete/rebuild tests
-- Stage 3
+- Stage 5
   - Worker configuration/binding static review와 Container build smoke
+  - `node --check "Archive Center.js"`, `cd go-service; go test ./... -count=1`, `git diff --check`
   - cloud runtime health/readiness contract tests 및 선택적 authenticated remote integration test
-- Stage 4
-  - `node --check "Archive Center.js"`
-  - `cd go-service; go test ./... -count=1`
-  - `git diff --check`
 
 ### 통합 검증
 
@@ -133,20 +140,20 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 
 ## 리스크
 
-- **Store capability 범위 과소평가**: Store optional interfaces가 많아 minimal D1 slice 밖의 route가 런타임 오류를 낼 수 있다. 실제 route/capability matrix와 explicit `ErrNotEnabled`/profile guard를 테스트한다.
+- **Store capability 범위 과소평가**: Store optional interfaces가 많아 minimal D1 slice 밖의 route가 런타임 오류를 낼 수 있다. Stage 1에서 실제 consumer·table·SQL semantic까지 전수 inventory하고, 승인된 matrix에 따라 explicit `ErrNotEnabled`/profile guard를 테스트한다.
 - **D1 SQL·동시성 차이**: MariaDB lock/upsert/JSON semantics를 그대로 사용하면 atomicity와 data integrity가 깨질 수 있다. D1-specific statements와 idempotency/retry contract를 별도 구현·검증한다.
 - **Vectorize eventual consistency**: upsert 직후 검색이 되지 않을 수 있다. canonical D1 fallback, outbox retry, deduplication, asynchronous observability를 적용한다.
 - **Cloudflare bridge contract mismatch**: Worker/Container networking and request-size/runtime limits가 Go expectations와 다를 수 있다. contract tests와 artifact configuration review, remote test boundary를 명시한다.
 - **계정 귀속 configuration 유출**: `account_id`, resource IDs, routes, token/secret이 source/template/image에 들어가면 재사용성과 security가 깨진다. tracked template에는 binding 이름만 두고, CI protected variables 또는 ignored local values로 temporary deploy config를 생성하며 static check로 금지한다.
 - **Local regression**: config/health refactor가 existing MariaDB/Chroma paths를 바꿀 수 있다. default/local profile regression tests와 full suite를 매 stage 실행한다.
-- **D1 schema 규모**: 현재 MariaDB migration inventory는 넓다. vertical slice의 table/capability boundary를 승인받고, 나머지는 capability별 후속 task로 분리한다.
+- **D1 schema 규모**: 현재 MariaDB migration inventory는 넓다. Stage 1 capability inventory의 table/call-site/transaction classification을 먼저 승인받은 뒤 vertical slice boundary와 후속 task를 결정한다.
 
 ## 승인 요청 사항
 
-- M470 기준으로 위 포함·제외 범위와 네 단계 분할을 승인해 주세요.
+- M470 기준으로 위 포함·제외 범위와 **5개 단계** 분할을 승인해 주세요.
 - D1 authoritative / Vectorize rebuildable accelerator / Worker binding bridge / stateless Container 방향을 승인해 주세요.
 - 계정-중립 template과 temporary deploy config renderer만 커밋하고, account/resource IDs·routes·tokens·secrets는 protected/ignored deploy-time values로 분리하는 것을 승인해 주세요.
-- 최초 vertical slice를 normal turn persistence·prepare-turn recall·memory vector outbox로 제한하고, reference library·admin/migration/session-repair full parity는 후속 capability task로 분리하는 것을 승인해 주세요.
+- Stage 1이 MariaDB Store capability·consumer·table·MariaDB SQL/transaction semantics를 전수 inventory한 뒤 D1 required/deferred/unsupported disposition을 승인받도록 하는 것을 승인해 주세요. 이 승인 전에는 normal turn/prepare-turn/outbox만을 최초 D1 vertical slice로 고정하지 않습니다.
 - `README.md`와 `deploy/cloudflare/README.md`를 최종 사용자/운영자 문서 위치로 사용하는 것을 승인해 주세요.
 
 승인되면 `task_m470_1_impl.md`에서 단계별 산출물, 검증 명령, 커밋 메시지를 구체화한다.

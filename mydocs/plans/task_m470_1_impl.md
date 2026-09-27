@@ -10,20 +10,54 @@ GitHub Issue: [#1](https://github.com/iamhelios07/archive-center/issues/1)
 
 | Stage | 제목 | 주요 산출 | 검증 |
 |---|---|---|---|
-| 1 | Provider-neutral bootstrap과 Worker bridge contract | Cloudflare runtime config, Go bridge client, Worker RPC surface | Go bridge/config contract tests 및 Worker static type/config check |
-| 2 | D1 canonical 최소 수직 경로 | D1 migration, D1 Store, normal turn canonical persistence/read | Store/httpapi contract, idempotency, session isolation tests |
-| 3 | Vectorize recall consistency | Vectorize provider, outbox lifecycle, fallback/dedup/rebuild | Vector/httpapi eventual-consistency and recovery tests |
-| 4 | Container artifact·호환성·운영 문서 | Container build, readiness, deployment docs, full regression evidence | JS/Go full suite, artifact review, optional remote boundary |
+| 1 | MariaDB capability inventory와 D1 scope decision | Store/consumer/table/SQL-semantic capability matrix | static inventory cross-check 및 local baseline tests |
+| 2 | Provider-neutral bootstrap과 Worker bridge contract | Cloudflare runtime config, Go bridge client, Worker RPC surface | Go bridge/config contract tests 및 Worker static type/config check |
+| 3 | D1 canonical vertical slice | inventory-approved D1 migration, D1 Store, required persistence/read | Store/httpapi contract, idempotency, session isolation tests |
+| 4 | Vectorize recall consistency | Vectorize provider, outbox lifecycle, fallback/dedup/rebuild | Vector/httpapi eventual-consistency and recovery tests |
+| 5 | Container artifact·호환성·운영 문서 | Container build, readiness, deployment docs, full regression evidence | JS/Go full suite, artifact review, optional remote boundary |
 
 ## 문서 위치 확인
 
 | 파일 | 수행계획서상 선택 위치 | Stage 산출물 경로 | 일치 여부 | 비고 |
 |---|---|---|---|---|
-| 사용자 진입 문서 | `README.md` | `README.md` | OK | Stage 4에서 Cloudflare option discovery 및 compatibility boundary를 추가한다. |
+| 사용자 진입 문서 | `README.md` | `README.md` | OK | Stage 5에서 Cloudflare option discovery 및 compatibility boundary를 추가한다. |
 | Cloudflare 운영 문서 | `deploy/cloudflare/README.md` | `deploy/cloudflare/README.md` | OK | Worker/Container artifact와 binding·migration 절차를 함께 둔다. |
 | 내부 계획·보고 | `mydocs/` | `mydocs/plans/`, `mydocs/working/`, `mydocs/report/` | OK | task artifacts only; 제품 문서로 취급하지 않는다. |
 
-## Stage 1 — Provider-neutral bootstrap과 Worker bridge contract
+## Stage 1 — MariaDB capability inventory와 D1 scope decision
+
+### 산출물
+
+신규:
+
+- `mydocs/tech/task_m470_1_mariadb_capability_inventory.md`
+
+### 변경 내용
+
+- 현재 `store.Store`의 base method와 optional interface를 전수 열거하고, 각 capability의 MariaDB implementation file, canonical table, MariaDB-specific SQL/transaction assumption, HTTP/runtime consumer를 하나의 matrix로 기록한다.
+- inventory는 direct `s.Store` call, optional-interface assertion, background worker, admin endpoint, migration/recovery path를 모두 구분한다. test-only helper와 실제 runtime consumer를 혼동하지 않는다.
+- 각 capability는 **D1 first-release required**, **D1 deferred (후속 Stage 또는 task)**, **Cloudflare profile explicit unsupported**, **local MariaDB-only operational path** 중 하나로 disposition을 정한다. required가 아닌 기능은 reason, affected endpoint/flow, user-visible/profile guard requirement를 반드시 기록한다.
+- Stage 1은 D1 schema, Go provider, Worker, Container source/artifact를 만들지 않는다. inventory review와 승인 후에만 Stage 2 이후의 D1 vertical slice와 artifact scope를 확정한다.
+
+### 검증
+
+```bash
+cd go-service
+go test ./internal/store ./internal/httpapi -count=1
+cd ..
+git diff --check
+```
+
+- `store.go`, 모든 `mariadb*.go`, MariaDB migration/schema, `internal/httpapi` 및 runtime/bootstrap consumer를 cross-check하여 matrix entry가 누락되지 않았는지 review한다.
+- capability matrix의 모든 row에는 implementation source, consumer classification, table/transaction dependency, D1 disposition과 decision rationale이 있어야 한다.
+
+### 커밋
+
+```text
+Task #1 Stage 1: MariaDB capability inventory 확정
+```
+
+## Stage 2 — Provider-neutral bootstrap과 Worker bridge contract
 
 ### 산출물
 
@@ -50,7 +84,7 @@ GitHub Issue: [#1](https://github.com/iamhelios07/archive-center/issues/1)
 
 - 기존 local runtime profile/store/vector mode의 default와 validation을 유지하면서, 명시 opt-in Cloudflare runtime profile과 provider-neutral dependency/health representation을 추가한다.
 - Go bridge client는 virtual host outbound binding만 사용한다. bridge URL, request timeout, request/response envelope, status-to-error mapping은 환경변수/HTTP contract로 고정하고 Cloudflare API token·D1/Vectorize SDK를 Go에 넣지 않는다.
-- Worker는 Container request를 virtual hostname으로 받으며 D1/Vectorize binding handler를 내부 route로 분기한다. Stage 1에서는 request validation, versioning, error mapping, health/ping surface와 mockable D1 bridge operation만 확정한다.
+- Worker는 Container request를 virtual hostname으로 받으며 D1/Vectorize binding handler를 내부 route로 분기한다. Stage 2에서는 request validation, versioning, error mapping, health/ping surface와 mockable D1 bridge operation만 확정한다.
 - tracked Wrangler template에는 stable binding names와 non-account-specific settings만 둔다. `account_id`, D1 resource ID, route/domain, token/secret은 넣지 않으며, `.gitignore`로 local/generated deploy config를 제외한다.
 - health/readiness 응답은 local MariaDB/Chroma labels와 behavior를 보존한 채 cloud provider status를 별도 표현한다. 아직 D1/Vectorize가 준비되지 않은 Cloudflare profile은 ready가 되지 않아야 한다.
 
@@ -70,10 +104,10 @@ git diff --check
 ### 커밋
 
 ```text
-Task #1 Stage 1: Cloudflare bridge와 runtime bootstrap 추가
+Task #1 Stage 2: Cloudflare bridge와 runtime bootstrap 추가
 ```
 
-## Stage 2 — D1 canonical 최소 수직 경로
+## Stage 3 — D1 canonical vertical slice
 
 ### 산출물
 
@@ -98,8 +132,8 @@ Task #1 Stage 1: Cloudflare bridge와 runtime bootstrap 추가
 
 ### 변경 내용
 
-- D1 migration은 최초 vertical slice에 필요한 chat log, effective input, memory, evidence, source revision, memory-vector outbox와 최소 session-scoped indexes만 정의한다. MariaDB migration inventory는 변경하지 않는다.
-- D1 Store는 existing `store.Store` contract를 충족하되, vertical-slice 밖 optional capability는 명시 capability check/`ErrNotEnabled`로 노출한다. unsupported path를 silent no-op으로 만들지 않는다.
+- D1 migration은 Stage 1 inventory에서 first-release required로 승인된 canonical tables, source revision/outbox, session-scoped indexes만 정의한다. MariaDB migration inventory는 변경하지 않는다.
+- D1 Store는 Stage 1 matrix에서 required로 확정된 `store.Store` capability를 충족한다. deferred 또는 unsupported capability는 matrix의 disposition에 따라 명시 capability check/`ErrNotEnabled` 또는 profile guard로 노출하며 silent no-op으로 만들지 않는다.
 - canonical write는 source revision/idempotency key 및 outbox enqueue를 D1 transaction contract로 묶는다. MariaDB lock/upsert/last-insert-id SQL을 재사용하지 않으며, D1-compatible statement와 deterministic IDs를 사용한다.
 - complete-turn 및 prepare-turn에서 D1 profile이 normal chat persistence와 canonical recall materialization을 수행하도록 연결한다. MariaDB/fixture/noop routes와 policy는 변경하지 않는다.
 
@@ -119,10 +153,10 @@ git diff --check
 ### 커밋
 
 ```text
-Task #1 Stage 2: D1 canonical vertical slice 추가
+Task #1 Stage 3: D1 canonical vertical slice 추가
 ```
 
-## Stage 3 — Vectorize recall consistency
+## Stage 4 — Vectorize recall consistency
 
 ### 산출물
 
@@ -163,10 +197,10 @@ git diff --check
 ### 커밋
 
 ```text
-Task #1 Stage 3: Vectorize recall consistency 추가
+Task #1 Stage 4: Vectorize recall consistency 추가
 ```
 
-## Stage 4 — Container artifact·호환성·운영 문서
+## Stage 5 — Container artifact·호환성·운영 문서
 
 ### 산출물
 
@@ -211,7 +245,7 @@ git status --short
 ### 커밋
 
 ```text
-Task #1 Stage 4: Cloudflare deployment compatibility 문서화
+Task #1 Stage 5: Cloudflare deployment compatibility 문서화
 ```
 
 ## 검증
@@ -229,22 +263,23 @@ Task #1 Stage 4: Cloudflare deployment compatibility 문서화
 
 ## 단계 의존성
 
-- Stage 2는 Stage 1의 runtime profile, bridge envelope, error mapping이 확정된 뒤에만 시작한다.
-- Stage 3은 Stage 2의 D1 canonical rows/outbox contract가 검증된 뒤에만 시작한다.
-- Stage 4는 Stage 3의 provider/readiness semantics가 검증되고 documentation procedure가 그 실제 artifact와 일치할 때만 시작한다.
+- Stage 2는 Stage 1의 MariaDB capability matrix와 D1 first-release disposition이 review·승인된 뒤에만 시작한다.
+- Stage 3은 Stage 2의 runtime profile, bridge envelope, error mapping이 확정된 뒤에만 시작한다.
+- Stage 4는 Stage 3의 D1 canonical rows/outbox contract가 검증된 뒤에만 시작한다.
+- Stage 5는 Stage 4의 provider/readiness semantics가 검증되고 documentation procedure가 그 실제 artifact와 일치할 때만 시작한다.
 
 ## 위험과 대응
 
-- **D1 Store contract broadness**: base Store and optional interfaces have wide surface area. Stage 2 uses explicit capability classification and tests every live vertical-slice call path; full parity is not silently claimed.
+- **D1 Store contract broadness**: base Store and optional interfaces have wide surface area. Stage 1 inventories every actual MariaDB consumer and its schema/SQL dependency before a D1 disposition is approved; Stage 3 then tests every required live call path. Full parity is not silently claimed.
 - **Worker bridge semantics**: D1 transaction/batch and Vectorize API response/error shapes may differ from assumptions. Keep a versioned envelope with contract tests before provider wiring.
 - **Eventual Vectorize visibility**: do not gate canonical turn success on immediate vector query. Use D1 outbox state plus recall fallback/dedup and recovery tests.
-- **Artifact drift**: Worker configuration, Container image, and documentation can diverge. Stage 4 static review must test declared host/binding names, account-neutral templates, and the absence of credential/resource embedding.
+- **Artifact drift**: Worker configuration, Container image, and documentation can diverge. Stage 5 static review must test declared host/binding names, account-neutral templates, and the absence of credential/resource embedding.
 - **Account-specific configuration leakage**: `account_id`, D1 resource IDs, domains/routes, or secrets in committed files would bind the artifact to one account and leak deployment details. Use stable binding names, ignored/local or protected deployment values, and a temporary rendered config only.
 - **Local compatibility regression**: run targeted and full Go tests plus JavaScript syntax validation; do not alter MariaDB/Chroma default selection.
 
 ## 승인 요청 사항
 
-- 위 4개 Stage의 순서, 파일 범위, verification gates, and commit boundaries를 승인해 주세요.
+- 위 5개 Stage의 순서, 파일 범위, verification gates, and commit boundaries를 승인해 주세요.
+- Stage 1에서 MariaDB Store capability·consumer·canonical table·SQL/transaction semantic을 전수 inventory하고, 그 D1 disposition을 별도 review/approval한 뒤에만 vertical slice를 확정하는 것을 승인해 주세요.
 - 계정 중립 `wrangler.template.toml`과 temporary deploy config renderer를 사용하고, account/resource IDs·routes·tokens·secrets를 source control에서 제외하는 deployment configuration boundary를 승인해 주세요.
-- 특히 Stage 2의 D1 vertical slice 밖 Store capability는 explicit unsupported/provider guard로 남기고, full capability parity를 후속 task로 분리하는 것을 승인해 주세요.
-- Stage 1부터 코드/artifact 변경을 시작해도 되는지 승인해 주세요.
+- Stage 1 inventory 문서와 Stage 1 완료보고서 작성을 시작해도 되는지 승인해 주세요.
