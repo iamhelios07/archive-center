@@ -335,17 +335,229 @@ func TestD1StoreUnimplementedMethodsFailLoudly(t *testing.T) {
 	if _, err := st.GetResumePack(ctx, "s1", "manual"); !errors.Is(err, errD1Unimplemented) {
 		t.Errorf("GetResumePack error = %v, want errD1Unimplemented", err)
 	}
-	if _, err := st.ListWorldRules(ctx, "s1"); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("ListWorldRules error = %v, want errD1Unimplemented", err)
+	if _, err := st.ListCharacterStates(ctx, "s1"); !errors.Is(err, errD1Unimplemented) {
+		t.Errorf("ListCharacterStates error = %v, want errD1Unimplemented", err)
 	}
-	if _, err := st.ListStorylines(ctx, "s1"); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("ListStorylines error = %v, want errD1Unimplemented", err)
+	if _, err := st.GetCharacterState(ctx, "s1", "hero"); !errors.Is(err, errD1Unimplemented) {
+		t.Errorf("GetCharacterState error = %v, want errD1Unimplemented", err)
 	}
 }
 
 func TestNewD1StoreRejectsNilConn(t *testing.T) {
 	if _, err := NewD1Store(nil); err == nil {
 		t.Error("NewD1Store(nil) must fail")
+	}
+}
+
+func TestD1StoreStorylines(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	for _, spec := range []struct {
+		name     string
+		lastTurn int
+	}{
+		{"early", 1},
+		{"late", 5},
+		{"middle", 3},
+	} {
+		if _, err := conn.Exec(ctx, `INSERT INTO storylines
+			(chat_session_id, name, last_turn, first_turn) VALUES ('s1', ?, ?, 0)`,
+			spec.name, spec.lastTurn); err != nil {
+			t.Fatalf("seed %s: %v", spec.name, err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `UPDATE storylines
+		SET entities_json = '["a"]', confidence = 0.75, evidence_count = 4
+		WHERE chat_session_id = 's1' AND name = 'late'`); err != nil {
+		t.Fatalf("populate nullable columns: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO storylines (chat_session_id, name, last_turn) VALUES ('s2', 'other', 9)`); err != nil {
+		t.Fatalf("seed other session: %v", err)
+	}
+
+	rows, err := st.ListStorylines(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListStorylines: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("storylines = %d, want 3 (session isolation)", len(rows))
+	}
+	for i, want := range []string{"late", "middle", "early"} {
+		if rows[i].Name != want {
+			t.Errorf("row %d = %q, want %q (last_turn DESC)", i, rows[i].Name, want)
+		}
+	}
+	if rows[0].EntitiesJSON != `["a"]` || rows[0].Confidence != 0.75 || rows[0].EvidenceCount != 4 {
+		t.Errorf("nullable columns did not round-trip: %+v", rows[0])
+	}
+	if rows[2].EntitiesJSON != "" || rows[2].Confidence != 0 || rows[2].EvidenceCount != 0 {
+		t.Errorf("NULL columns must read as zero values: %+v", rows[2])
+	}
+}
+
+func TestD1StoreListWorldRulesKeepsLatestPerGroup(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	// Two revisions of the same (scope, key, scope_name) group: only the newest
+	// source_turn survives.
+	if _, err := conn.Exec(ctx, `INSERT INTO world_rules
+		(chat_session_id, scope, scope_name, category, "key", value_json, source_turn)
+		VALUES ('s1', 'root', NULL, 'custom', 'k1', 'v1', 1)`); err != nil {
+		t.Fatalf("seed k1 v1: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO world_rules
+		(chat_session_id, scope, scope_name, category, "key", value_json, source_turn)
+		VALUES ('s1', 'root', NULL, 'custom', 'k1', 'v2', 2)`); err != nil {
+		t.Fatalf("seed k1 v2: %v", err)
+	}
+	// A named scope_name is a different group even with the same scope and key,
+	// which is what MariaDB's <=> null-safe comparison expresses.
+	if _, err := conn.Exec(ctx, `INSERT INTO world_rules
+		(chat_session_id, scope, scope_name, category, "key", value_json, source_turn)
+		VALUES ('s1', 'root', 'north', 'custom', 'k1', 'v-named', 1)`); err != nil {
+		t.Fatalf("seed named: %v", err)
+	}
+
+	rules, err := st.ListWorldRules(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListWorldRules: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("rules = %d, want 2 (one per null-safe group)", len(rules))
+	}
+	byName := map[string]string{}
+	for _, rule := range rules {
+		byName[rule.ScopeName] = rule.ValueJSON
+	}
+	if byName[""] != "v2" {
+		t.Errorf("unnamed group value = %q, want the newest revision v2", byName[""])
+	}
+	if byName["north"] != "v-named" {
+		t.Errorf("named group value = %q, want v-named", byName["north"])
+	}
+}
+
+func TestD1StoreListInheritedWorldRulesChainAndFilters(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	seed := func(scope, scopeName, key string, sourceTurn int, suppressed int, pinned int) {
+		t.Helper()
+		if _, err := conn.Exec(ctx, `INSERT INTO world_rules
+			(chat_session_id, scope, scope_name, category, "key", value_json, source_turn, suppressed, pinned)
+			VALUES ('s1', ?, ?, 'custom', ?, 'v', ?, ?, ?)`,
+			scope, d1NullableString(scopeName), key, sourceTurn, suppressed, pinned); err != nil {
+			t.Fatalf("seed %s/%s/%s: %v", scope, scopeName, key, err)
+		}
+	}
+	seed("location", "", "loc", 1, 0, 0)
+	seed("region", "", "reg", 1, 0, 0)
+	seed("root", "", "roots", 1, 0, 0)
+	seed("session", "", "sess", 1, 0, 0)
+	seed("faction", "", "out-of-chain", 1, 0, 0)
+	seed("location", "", "suppressed", 1, 1, 0)
+	seed("location", "north", "named", 1, 0, 0)
+	seed("location", "", "pinned", 1, 0, 1)
+
+	// The chain for location is location -> region -> root -> session.
+	rules, err := st.ListInheritedWorldRules(ctx, "s1", "location", "")
+	if err != nil {
+		t.Fatalf("ListInheritedWorldRules: %v", err)
+	}
+	keys := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		keys = append(keys, rule.Key)
+	}
+	contains := func(list []string, want string) bool {
+		for _, item := range list {
+			if item == want {
+				return true
+			}
+		}
+		return false
+	}
+	if contains(keys, "out-of-chain") {
+		t.Errorf("faction rule must be excluded from the location chain: %v", keys)
+	}
+	if contains(keys, "suppressed") {
+		t.Errorf("suppressed rule must be excluded: %v", keys)
+	}
+	if contains(keys, "named") {
+		t.Errorf("named scope_name must be excluded when no scope name is requested: %v", keys)
+	}
+	for _, want := range []string{"pinned", "loc", "reg", "roots", "sess"} {
+		if !contains(keys, want) {
+			t.Errorf("missing %q in inherited rules: %v", want, keys)
+		}
+	}
+	// location comes before its ancestors, and a pinned rule leads its scope.
+	if len(rules) == 0 || rules[0].Key != "pinned" {
+		t.Fatalf("pinned rule must lead the chain order: %v", keys)
+	}
+	scopeOrder := map[string]int{"location": 0, "region": 1, "root": 2, "session": 3}
+	previous := -1
+	for _, rule := range rules {
+		position := scopeOrder[rule.Scope]
+		if position < previous {
+			t.Errorf("chain proximity ordering broken at %q: %v", rule.Scope, keys)
+		}
+		previous = position
+	}
+
+	// An explicit scope name narrows the active scope only.
+	named, err := st.ListInheritedWorldRules(ctx, "s1", "location", "north")
+	if err != nil {
+		t.Fatalf("ListInheritedWorldRules named: %v", err)
+	}
+	for _, rule := range named {
+		if rule.Scope == "location" && rule.ScopeName != "north" {
+			t.Errorf("named request leaked an unnamed location rule: %+v", rule)
+		}
+		if rule.Scope != "location" && rule.ScopeName != "" {
+			t.Errorf("ancestor scopes must stay unnamed: %+v", rule)
+		}
+	}
+}
+
+func TestD1StoreActiveScopeFallbackAndUpsert(t *testing.T) {
+	st, _ := newD1TestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.GetActiveScope(ctx, "s1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing active scope error = %v, want ErrNotFound", err)
+	}
+
+	if err := st.UpsertActiveScope(ctx, &SessionActiveScope{
+		ChatSessionID: "s1", ActiveScope: "location", ScopeName: "north",
+	}); err != nil {
+		t.Fatalf("UpsertActiveScope: %v", err)
+	}
+	saved, err := st.GetActiveScope(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetActiveScope: %v", err)
+	}
+	if saved.ActiveScope != "location" || saved.ScopeName != "north" {
+		t.Errorf("active scope = %+v", saved)
+	}
+
+	// A second upsert must update in place, not insert a duplicate row.
+	if err := st.UpsertActiveScope(ctx, &SessionActiveScope{
+		ChatSessionID: "s1", ActiveScope: "region",
+	}); err != nil {
+		t.Fatalf("second UpsertActiveScope: %v", err)
+	}
+	updated, err := st.GetActiveScope(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetActiveScope after update: %v", err)
+	}
+	if updated.ID != saved.ID || updated.ActiveScope != "region" || updated.ScopeName != "" {
+		t.Errorf("upsert must update the same row: before=%+v after=%+v", saved, updated)
+	}
+
+	if err := st.UpsertActiveScope(ctx, nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("nil upsert error = %v, want ErrNotFound", err)
 	}
 }
 

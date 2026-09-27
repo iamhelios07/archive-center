@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +33,10 @@ type d1Store struct {
 }
 
 var _ Store = (*d1Store)(nil)
+
+// d1Store also satisfies the optional active-scope contract, which
+// ListInheritedWorldRules and the world-graph routes depend on.
+var _ ActiveScopeStore = (*d1Store)(nil)
 
 // NewD1Store returns the D1 canonical store over the given transport. The
 // returned value satisfies Store; unimplemented methods return a loud error.
@@ -753,22 +758,237 @@ func d1ApplyEpisodeSummaryNullables(item *EpisodeSummary, keyEntities, keyEvents
 }
 
 // ---------------------------------------------------------------------------
+// storylines and world rules
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) ListStorylines(ctx context.Context, chatSessionID string) ([]Storyline, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, chat_session_id, name, status, entities_json, current_context, key_points_json,
+			   ongoing_tensions_json, confidence, evidence_count, last_evidence_turn, first_turn, last_turn,
+			   pinned, suppressed, user_corrected, created_at, updated_at
+		FROM storylines
+		WHERE chat_session_id = ?
+		ORDER BY last_turn DESC, id DESC
+	`, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Storyline
+	for rows.Next() {
+		var item Storyline
+		var entitiesJSON, currentContext, keyPointsJSON, ongoingTensionsJSON *string
+		var confidence *float64
+		var evidenceCount, lastEvidenceTurn, firstTurn, lastTurn *int64
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.Name, &item.Status,
+			&entitiesJSON, &currentContext, &keyPointsJSON, &ongoingTensionsJSON,
+			&confidence, &evidenceCount, &lastEvidenceTurn, &firstTurn, &lastTurn,
+			&item.Pinned, &item.Suppressed, &item.UserCorrected, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.EntitiesJSON = d1DerefString(entitiesJSON)
+		item.CurrentContext = d1DerefString(currentContext)
+		item.KeyPointsJSON = d1DerefString(keyPointsJSON)
+		item.OngoingTensionsJSON = d1DerefString(ongoingTensionsJSON)
+		item.Confidence = d1DerefFloat64(confidence)
+		item.EvidenceCount = int(d1DerefInt64(evidenceCount))
+		item.LastEvidenceTurn = int(d1DerefInt64(lastEvidenceTurn))
+		item.FirstTurn = int(d1DerefInt64(firstTurn))
+		item.LastTurn = int(d1DerefInt64(lastTurn))
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// d1LatestWorldRulePredicate mirrors the MariaDB "newest row per
+// (scope, key, scope_name)" correlated subquery. MariaDB's <=> null-safe equality
+// becomes SQLite's IS operator, which is also null-safe: two NULLs compare equal
+// and a NULL never equals a non-NULL.
+const d1LatestWorldRulePredicate = `
+		current_rule.id = (
+			SELECT candidate.id
+			FROM world_rules AS candidate
+			WHERE candidate.chat_session_id = current_rule.chat_session_id
+			  AND candidate.scope = current_rule.scope
+			  AND candidate."key" = current_rule."key"
+			  AND candidate.scope_name IS current_rule.scope_name
+			ORDER BY COALESCE(candidate.source_turn, 0) DESC, candidate.id DESC
+			LIMIT 1
+		)`
+
+const d1WorldRuleSelect = `
+		SELECT id, chat_session_id, scope, scope_name, category, "key", value_json, genre, source_turn,
+			   pinned, suppressed, user_corrected, created_at, updated_at
+		FROM world_rules AS current_rule`
+
+func (s *d1Store) ListWorldRules(ctx context.Context, chatSessionID string) ([]WorldRule, error) {
+	rows, err := s.conn.Query(ctx, d1WorldRuleSelect+`
+		WHERE current_rule.chat_session_id = ?
+		  AND `+d1LatestWorldRulePredicate+`
+		ORDER BY current_rule.scope, current_rule.category, current_rule."key"
+	`, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	return d1ScanWorldRules(rows)
+}
+
+func (s *d1Store) ListInheritedWorldRules(ctx context.Context, chatSessionID string, activeScope, scopeName string) ([]WorldRule, error) {
+	activeScope = strings.TrimSpace(activeScope)
+	scopeName = strings.TrimSpace(scopeName)
+	if activeScope == "" {
+		// Fall back to the persisted active scope, exactly as the MariaDB path
+		// does, and keep an explicit scope name when one was supplied.
+		saved, err := s.GetActiveScope(ctx, chatSessionID)
+		switch {
+		case err == nil && saved != nil:
+			activeScope = strings.TrimSpace(saved.ActiveScope)
+			if scopeName == "" {
+				scopeName = strings.TrimSpace(saved.ScopeName)
+			}
+		case err != nil && !errors.Is(err, ErrNotFound):
+			return nil, err
+		}
+	}
+	if activeScope == "" {
+		activeScope = "root"
+	}
+
+	// MariaDB relies on the driver's boolean handling; SQLite stores the flags as
+	// INTEGER, so the suppressed filter compares against 0.
+	rows, err := s.conn.Query(ctx, d1WorldRuleSelect+`
+		WHERE current_rule.chat_session_id = ?
+		  AND `+d1LatestWorldRulePredicate+`
+		  AND current_rule.suppressed = 0
+		ORDER BY current_rule.scope, current_rule.category, current_rule."key"
+	`, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := d1ScanWorldRules(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reduce to the active scope chain, then apply the same precedence the
+	// MariaDB path uses: proximity in the chain, pinned rules first, then
+	// category, key, and id.
+	chain := WorldRuleScopeChain(activeScope)
+	chainOrder := make(map[string]int, len(chain))
+	for i, scope := range chain {
+		chainOrder[scope] = i
+	}
+	normalizedActive := NormalizeWorldRuleScope(activeScope)
+	out := make([]WorldRule, 0, len(candidates))
+	for _, item := range candidates {
+		itemScope := NormalizeWorldRuleScope(item.Scope)
+		if _, ok := chainOrder[itemScope]; !ok {
+			continue
+		}
+		if itemScope == normalizedActive {
+			// Only the active scope is narrowed by scope name: an explicit name
+			// selects that name exactly, and no name selects the unnamed rules.
+			if scopeName != "" && strings.TrimSpace(item.ScopeName) != scopeName {
+				continue
+			}
+			if scopeName == "" && strings.TrimSpace(item.ScopeName) != "" {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := chainOrder[NormalizeWorldRuleScope(out[i].Scope)]
+		right := chainOrder[NormalizeWorldRuleScope(out[j].Scope)]
+		if left != right {
+			return left < right
+		}
+		if out[i].Pinned != out[j].Pinned {
+			return out[i].Pinned
+		}
+		if out[i].Category != out[j].Category {
+			return out[i].Category < out[j].Category
+		}
+		if out[i].Key != out[j].Key {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func d1ScanWorldRules(rows D1Rows) ([]WorldRule, error) {
+	defer rows.Close()
+	var out []WorldRule
+	for rows.Next() {
+		var item WorldRule
+		var scopeNameNull, genre, valueJSON *string
+		var sourceTurn *int64
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.Scope, &scopeNameNull, &item.Category, &item.Key,
+			&valueJSON, &genre, &sourceTurn, &item.Pinned, &item.Suppressed, &item.UserCorrected,
+			&item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.ScopeName = d1DerefString(scopeNameNull)
+		item.ValueJSON = d1DerefString(valueJSON)
+		item.Genre = d1DerefString(genre)
+		item.SourceTurn = int(d1DerefInt64(sourceTurn))
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// active scope (ActiveScopeStore)
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) GetActiveScope(ctx context.Context, chatSessionID string) (*SessionActiveScope, error) {
+	var item SessionActiveScope
+	var scopeName *string
+	err := s.conn.QueryRow(ctx, `
+		SELECT id, chat_session_id, active_scope, scope_name, updated_at
+		FROM session_active_scopes
+		WHERE chat_session_id = ?
+		LIMIT 1
+	`, chatSessionID).Scan(&item.ID, &item.ChatSessionID, &item.ActiveScope, &scopeName, &item.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, errD1NoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	item.ScopeName = d1DerefString(scopeName)
+	return &item, nil
+}
+
+func (s *d1Store) UpsertActiveScope(ctx context.Context, item *SessionActiveScope) error {
+	if item == nil || strings.TrimSpace(item.ChatSessionID) == "" {
+		return ErrNotFound
+	}
+	activeScope := strings.TrimSpace(item.ActiveScope)
+	if activeScope == "" {
+		activeScope = "root"
+	}
+	updatedAt := d1TimeValue(item.UpdatedAt)
+	// MariaDB's ON DUPLICATE KEY UPDATE becomes SQLite's ON CONFLICT upsert on the
+	// session_active_scopes unique key.
+	_, err := s.conn.Exec(ctx, `
+		INSERT INTO session_active_scopes (chat_session_id, active_scope, scope_name, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (chat_session_id) DO UPDATE SET
+			active_scope = excluded.active_scope,
+			scope_name = excluded.scope_name,
+			updated_at = excluded.updated_at
+	`, item.ChatSessionID, activeScope, d1NullableString(item.ScopeName), updatedAt)
+	return err
+}
+
+// ---------------------------------------------------------------------------
 // not yet implemented
 // ---------------------------------------------------------------------------
 
 func (s *d1Store) GetResumePack(context.Context, string, string) (*ResumePack, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListStorylines(context.Context, string) ([]Storyline, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListWorldRules(context.Context, string) ([]WorldRule, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListInheritedWorldRules(context.Context, string, string, string) ([]WorldRule, error) {
 	return nil, errD1Unimplemented
 }
 
