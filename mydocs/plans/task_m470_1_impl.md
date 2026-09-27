@@ -35,7 +35,8 @@ GitHub Issue: [#1](https://github.com/iamhelios07/archive-center/issues/1)
 - `deploy/cloudflare/worker/package.json`
 - `deploy/cloudflare/worker/package-lock.json`
 - `deploy/cloudflare/worker/tsconfig.json`
-- `deploy/cloudflare/wrangler.toml`
+- `deploy/cloudflare/wrangler.template.toml`
+- `deploy/cloudflare/.gitignore`
 
 수정:
 
@@ -50,6 +51,7 @@ GitHub Issue: [#1](https://github.com/iamhelios07/archive-center/issues/1)
 - 기존 local runtime profile/store/vector mode의 default와 validation을 유지하면서, 명시 opt-in Cloudflare runtime profile과 provider-neutral dependency/health representation을 추가한다.
 - Go bridge client는 virtual host outbound binding만 사용한다. bridge URL, request timeout, request/response envelope, status-to-error mapping은 환경변수/HTTP contract로 고정하고 Cloudflare API token·D1/Vectorize SDK를 Go에 넣지 않는다.
 - Worker는 Container request를 virtual hostname으로 받으며 D1/Vectorize binding handler를 내부 route로 분기한다. Stage 1에서는 request validation, versioning, error mapping, health/ping surface와 mockable D1 bridge operation만 확정한다.
+- tracked Wrangler template에는 stable binding names와 non-account-specific settings만 둔다. `account_id`, D1 resource ID, route/domain, token/secret은 넣지 않으며, `.gitignore`로 local/generated deploy config를 제외한다.
 - health/readiness 응답은 local MariaDB/Chroma labels와 behavior를 보존한 채 cloud provider status를 별도 표현한다. 아직 D1/Vectorize가 준비되지 않은 Cloudflare profile은 ready가 되지 않아야 한다.
 
 ### 검증
@@ -173,20 +175,23 @@ Task #1 Stage 3: Vectorize recall consistency 추가
 - `deploy/cloudflare/container/Dockerfile`
 - `deploy/cloudflare/container/.dockerignore`
 - `deploy/cloudflare/README.md`
+- `deploy/cloudflare/scripts/render-wrangler-config.mjs`
 - 필요한 Cloudflare artifact static validation test 또는 script
 
 수정:
 
 - `README.md`
-- `deploy/cloudflare/wrangler.toml`
+- `deploy/cloudflare/wrangler.template.toml`
+- `deploy/cloudflare/.gitignore`
 - `go-service/internal/httpapi/group_health.go` 및 관련 tests
 - 필요한 CI/build configuration
 
 ### 변경 내용
 
 - Container artifact는 Go backend를 stateless로 실행하고, product data·migration state·queue/session state를 local filesystem에 쓰지 않도록 명시한다.
-- Worker configuration은 D1, Vectorize, Container binding 및 outbound virtual host mapping만 선언하며 secret/API-token value는 sample·source·image에 넣지 않는다.
-- README는 Cloudflare option이 explicit opt-in이고 existing local MariaDB/Chroma mode와 공존함을 설명한다. Cloudflare guide는 prerequisite, binding names, D1 migration, Worker/Container build/deploy, health verification, Vectorize rebuild, local/remote test boundary를 설명한다.
+- Worker configuration template은 D1, Vectorize, Container binding 이름과 outbound virtual host mapping만 선언하며 account ID, resource ID, route/domain, secret/API token은 sample·source·image에 넣지 않는다.
+- predeploy renderer는 CI protected variables 또는 gitignore된 local values만 읽어 tracked tree 밖 temporary Wrangler config를 만들고, deploy command는 그 temporary config만 사용한다.
+- README는 Cloudflare option이 explicit opt-in이고 existing local MariaDB/Chroma mode와 공존함을 설명한다. Cloudflare guide는 account-neutral template, required deploy-time variable names, binding names, D1 migration, Worker/Container build/deploy, health verification, Vectorize rebuild, local/remote test boundary를 설명한다.
 - provider-neutral readiness/health surface, artifact configuration and test results are aligned with the documented procedure.
 
 ### 검증
@@ -200,8 +205,8 @@ git diff --check
 git status --short
 ```
 
-- Worker/container configuration은 binding names, outbound host routes, no direct Go Cloudflare credential, no persistent container filesystem use를 review한다.
-- Cloudflare account credentials가 제공된 경우에만 remote D1/Vectorize/Container integration smoke를 실행하고, 제공되지 않으면 local/mocked boundary와 미실행 이유를 final report에 기록한다.
+- Worker/container configuration은 binding names, outbound host routes, no direct Go Cloudflare credential, no persistent container filesystem use를 review한다. tracked template/source/image에 account ID, resource ID, route/domain, token/secret이 없는지도 static check한다.
+- Cloudflare account credentials와 resource mapping이 CI protected variables 또는 ignored local values로 제공된 경우에만 remote D1/Vectorize/Container integration smoke를 실행하고, 제공되지 않으면 local/mocked boundary와 미실행 이유를 final report에 기록한다.
 
 ### 커밋
 
@@ -233,11 +238,13 @@ Task #1 Stage 4: Cloudflare deployment compatibility 문서화
 - **D1 Store contract broadness**: base Store and optional interfaces have wide surface area. Stage 2 uses explicit capability classification and tests every live vertical-slice call path; full parity is not silently claimed.
 - **Worker bridge semantics**: D1 transaction/batch and Vectorize API response/error shapes may differ from assumptions. Keep a versioned envelope with contract tests before provider wiring.
 - **Eventual Vectorize visibility**: do not gate canonical turn success on immediate vector query. Use D1 outbox state plus recall fallback/dedup and recovery tests.
-- **Artifact drift**: Worker configuration, Container image, and documentation can diverge. Stage 4 static review must test declared host/binding names and forbid credential embedding.
+- **Artifact drift**: Worker configuration, Container image, and documentation can diverge. Stage 4 static review must test declared host/binding names, account-neutral templates, and the absence of credential/resource embedding.
+- **Account-specific configuration leakage**: `account_id`, D1 resource IDs, domains/routes, or secrets in committed files would bind the artifact to one account and leak deployment details. Use stable binding names, ignored/local or protected deployment values, and a temporary rendered config only.
 - **Local compatibility regression**: run targeted and full Go tests plus JavaScript syntax validation; do not alter MariaDB/Chroma default selection.
 
 ## 승인 요청 사항
 
 - 위 4개 Stage의 순서, 파일 범위, verification gates, and commit boundaries를 승인해 주세요.
+- 계정 중립 `wrangler.template.toml`과 temporary deploy config renderer를 사용하고, account/resource IDs·routes·tokens·secrets를 source control에서 제외하는 deployment configuration boundary를 승인해 주세요.
 - 특히 Stage 2의 D1 vertical slice 밖 Store capability는 explicit unsupported/provider guard로 남기고, full capability parity를 후속 task로 분리하는 것을 승인해 주세요.
 - Stage 1부터 코드/artifact 변경을 시작해도 되는지 승인해 주세요.

@@ -24,7 +24,7 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 - Container에서 virtual hostname outbound binding bridge로 D1/Vectorize Worker handler에 요청하는 Go-side client contract
 - D1 canonical schema/migration과 normal chat·memory persistence/prepare-turn recall·memory vector outbox의 최소 end-to-end vertical slice
 - Vectorize metadata contract, asynchronous mutation handling, D1 fallback, session isolation, delete/rebuild capability
-- Cloudflare Worker/Container build·binding configuration과 Cloudflare runtime readiness/health
+- 계정 중립 Cloudflare Worker/Container build·binding template, deploy-time resource mapping과 Cloudflare runtime readiness/health
 - 기존 MariaDB/Chroma local runtime에 대한 unit/contract/compatibility regression tests
 - Cloudflare deployment procedure 및 local/remote test boundary 문서화
 
@@ -32,6 +32,7 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 
 - MariaDB 또는 ChromaDB의 제거, default runtime 변경, 강제 data migration
 - Container에서 Cloudflare API token REST 호출로 D1 또는 Vectorize에 직접 접근하는 방식
+- 저장소에 특정 Cloudflare account ID, D1 database ID, API token, secret, domain/route를 커밋하는 방식
 - Container filesystem, R2, FUSE를 canonical database 또는 durable queue/state로 사용하는 방식
 - 검증 전 전체 MariaDB SQL을 SQLite/D1 SQL로 기계 변환하는 작업
 - 모든 reference library·admin/migration/session-repair capability를 최초 vertical slice에 포함하는 작업
@@ -41,6 +42,7 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 
 - 새 `RuntimeProfile`/store/vector provider 선택은 existing local profiles를 보존하고 Cloudflare profile을 명시 opt-in으로 추가한다. HTTP handlers는 D1/Vectorize SDK나 Cloudflare credential을 직접 알지 않는다.
 - Worker는 D1·Vectorize bindings의 유일한 owner이고, Container backend에는 `outboundByHost` virtual host를 제공한다. Go는 `archive-d1`/`archive-vectorize` 같은 bridge host에 JSON RPC/HTTP 요청만 보낸다.
+- 커밋하는 Worker configuration은 binding 이름과 계정-중립 template만 포함한다. account/resource ID와 secrets는 CI protected variables 또는 gitignore된 deploy config에서 주입하고, predeploy renderer가 tracked tree 밖 임시 config를 만들어 사용한다.
 - D1 write는 idempotency key, source revision, outbox lease/state를 canonical table transaction 안에서 확정한다. MariaDB의 `FOR UPDATE`, `ON DUPLICATE KEY UPDATE`, `LAST_INSERT_ID`, JSON 표현식은 D1/SQLite semantics에 맞춘 별도 SQL과 concurrency contract로 대체한다.
 - Vectorize에는 vector ID, embedding, session/source/tier/revision 등 최소 검색 metadata만 저장한다. text·authoritative payload는 D1에서 hydrate하고, recent D1 rows를 recall 결과에 병합한 뒤 ID로 deduplicate한다.
 - Vector outbox는 Vectorize mutation 요청 성공과 eventual query visibility를 분리한다. 즉시 exact readback을 완료 조건으로 요구하지 않으며, 재시도·rebuild는 D1 canonical rows와 outbox 상태를 기반으로 한다.
@@ -60,8 +62,8 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 
 신규:
 
-- `deploy/cloudflare/wrangler.toml` 또는 동등한 Worker configuration
-- `deploy/cloudflare/src/worker.ts` 및 D1/Vectorize outbound bridge handler
+- `deploy/cloudflare/wrangler.template.toml`, `.gitignore`, deploy-time config renderer 또는 동등한 계정-중립 Worker configuration
+- `deploy/cloudflare/worker/src/index.ts` 및 D1/Vectorize outbound bridge handler
 - `deploy/cloudflare/container/Dockerfile` 및 Container runtime configuration
 - `deploy/cloudflare/README.md`
 - `go-service/internal/store/d1_*.go` 및 D1 provider contract/unit tests
@@ -124,7 +126,8 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 - MariaDB + ChromaDB local runtime의 existing config, public API, tests가 유지된다.
 - D1만으로 canonical data와 outbox lifecycle을 복구할 수 있고 Vectorize는 D1에서 rebuild할 수 있다.
 - Cloudflare Container restart가 product data, session state, migration state, queue state에 의존하지 않는다.
-- Cloudflare bindings configuration에 Container-side Cloudflare API token 또는 direct binding credential이 없다.
+- Cloudflare bindings configuration에 Container-side Cloudflare API token 또는 direct binding credential이 없고, tracked template/source/image에 account ID, resource ID, secret, domain/route가 없다.
+- deploy-time account/resource mapping은 CI protected variables 또는 gitignore된 local config에서만 받아 tracked tree 밖의 temporary Wrangler config로 materialize한다.
 - `git status --short`가 PR 준비 전 빈 출력이다.
 - `git diff --check`가 경고 없이 통과한다.
 
@@ -134,6 +137,7 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 - **D1 SQL·동시성 차이**: MariaDB lock/upsert/JSON semantics를 그대로 사용하면 atomicity와 data integrity가 깨질 수 있다. D1-specific statements와 idempotency/retry contract를 별도 구현·검증한다.
 - **Vectorize eventual consistency**: upsert 직후 검색이 되지 않을 수 있다. canonical D1 fallback, outbox retry, deduplication, asynchronous observability를 적용한다.
 - **Cloudflare bridge contract mismatch**: Worker/Container networking and request-size/runtime limits가 Go expectations와 다를 수 있다. contract tests와 artifact configuration review, remote test boundary를 명시한다.
+- **계정 귀속 configuration 유출**: `account_id`, resource IDs, routes, token/secret이 source/template/image에 들어가면 재사용성과 security가 깨진다. tracked template에는 binding 이름만 두고, CI protected variables 또는 ignored local values로 temporary deploy config를 생성하며 static check로 금지한다.
 - **Local regression**: config/health refactor가 existing MariaDB/Chroma paths를 바꿀 수 있다. default/local profile regression tests와 full suite를 매 stage 실행한다.
 - **D1 schema 규모**: 현재 MariaDB migration inventory는 넓다. vertical slice의 table/capability boundary를 승인받고, 나머지는 capability별 후속 task로 분리한다.
 
@@ -141,6 +145,7 @@ D1은 모든 canonical product data의 권위 저장소이고, Vectorize는 D1�
 
 - M470 기준으로 위 포함·제외 범위와 네 단계 분할을 승인해 주세요.
 - D1 authoritative / Vectorize rebuildable accelerator / Worker binding bridge / stateless Container 방향을 승인해 주세요.
+- 계정-중립 template과 temporary deploy config renderer만 커밋하고, account/resource IDs·routes·tokens·secrets는 protected/ignored deploy-time values로 분리하는 것을 승인해 주세요.
 - 최초 vertical slice를 normal turn persistence·prepare-turn recall·memory vector outbox로 제한하고, reference library·admin/migration/session-repair full parity는 후속 capability task로 분리하는 것을 승인해 주세요.
 - `README.md`와 `deploy/cloudflare/README.md`를 최종 사용자/운영자 문서 위치로 사용하는 것을 승인해 주세요.
 
