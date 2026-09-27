@@ -6,38 +6,46 @@ GitHub Issue: [#1](https://github.com/iamhelios07/archive-center/issues/1)
 
 마일스톤: M470
 
+## parity 원칙
+
+Cloudflare profile은 MariaDB + ChromaDB local runtime의 축소판이 아니다. 현재 노출된 사용자 기능과 운영 기능은 모두 functional-parity target이며, `C`(D1 canonical), `V`(Vectorize semantic consistency), `O`(operator/admin) 표기는 구현·검증 gate일 뿐 지원 제외 disposition이 아니다. gate가 미완료인 동안에는 Cloudflare option을 ready deployment로 제공하지 않는다. 기존 local default·public API·behavior는 전 단계에서 보존한다.
+
 ## 단계 개요
 
 | Stage | 제목 | 주요 산출 | 검증 |
 |---|---|---|---|
-| 1 | MariaDB capability inventory와 D1 scope decision | Store/consumer/table/SQL-semantic capability matrix | static inventory cross-check 및 local baseline tests |
-| 2 | Provider-neutral bootstrap과 Worker bridge contract | Cloudflare runtime config, Go bridge client, Worker RPC surface | Go bridge/config contract tests 및 Worker static type/config check |
-| 3 | D1 canonical vertical slice | inventory-approved D1 migration, D1 Store, required persistence/read | Store/httpapi contract, idempotency, session isolation tests |
-| 4 | Vectorize recall consistency | Vectorize provider, outbox lifecycle, fallback/dedup/rebuild | Vector/httpapi eventual-consistency and recovery tests |
-| 5 | Container artifact·호환성·운영 문서 | Container build, readiness, deployment docs, full regression evidence | JS/Go full suite, artifact review, optional remote boundary |
+| 1 | MariaDB capability parity inventory와 gate map | Store/consumer/table/SQL-semantic matrix, P/C/V/O gate | static inventory cross-check 및 local baseline tests |
+| 2 | Provider-neutral bootstrap과 Worker bridge contract | Cloudflare runtime config, generic Go bridge client, versioned Worker RPC | Go bridge/config contract tests 및 Worker static type/config check |
+| 3 | D1 canonical parity | full D1 schema/provider, canonical persistence/read/update/rollback/reference/session contract | Store/httpapi parity, transaction/idempotency/session isolation tests |
+| 4 | Vectorize semantic parity | Vectorize provider, outbox, fallback/dedup/rebuild/reprocessing/recovery | eventual-consistency, recovery and Chroma compatibility tests |
+| 5 | Operator parity·Container artifact·운영 문서 | admin/migration/recovery/source/canon procedures, Container build, deployment docs | operator contract, full regression, artifact/account-neutral review |
 
 ## 문서 위치 확인
 
 | 파일 | 수행계획서상 선택 위치 | Stage 산출물 경로 | 일치 여부 | 비고 |
 |---|---|---|---|---|
-| 사용자 진입 문서 | `README.md` | `README.md` | OK | Stage 5에서 Cloudflare option discovery 및 compatibility boundary를 추가한다. |
-| Cloudflare 운영 문서 | `deploy/cloudflare/README.md` | `deploy/cloudflare/README.md` | OK | Worker/Container artifact와 binding·migration 절차를 함께 둔다. |
-| 내부 계획·보고 | `mydocs/` | `mydocs/plans/`, `mydocs/working/`, `mydocs/report/` | OK | task artifacts only; 제품 문서로 취급하지 않는다. |
+| 사용자 진입 문서 | `README.md` | `README.md` | OK | Stage 5에서 Cloudflare option과 parity/readiness boundary를 추가한다. |
+| Cloudflare 운영 문서 | `deploy/cloudflare/README.md` | `deploy/cloudflare/README.md` | OK | Worker/Container artifact, binding, parity migration/recovery 절차를 함께 둔다. |
+| 내부 계획·보고 | `mydocs/` | `mydocs/plans/`, `mydocs/tech/`, `mydocs/working/`, `mydocs/report/` | OK | task artifacts only; 제품 문서로 취급하지 않는다. |
 
-## Stage 1 — MariaDB capability inventory와 D1 scope decision
+## Stage 1 — MariaDB capability parity inventory와 gate map
 
 ### 산출물
 
-신규:
+수정:
 
 - `mydocs/tech/task_m470_1_mariadb_capability_inventory.md`
+- `mydocs/working/task_m470_1_stage1.md`
+- `mydocs/plans/task_m470_1.md`
+- `mydocs/plans/task_m470_1_impl.md`
 
 ### 변경 내용
 
-- 현재 `store.Store`의 base method와 optional interface를 전수 열거하고, 각 capability의 MariaDB implementation file, canonical table, MariaDB-specific SQL/transaction assumption, HTTP/runtime consumer를 하나의 matrix로 기록한다.
-- inventory는 direct `s.Store` call, optional-interface assertion, background worker, admin endpoint, migration/recovery path를 모두 구분한다. test-only helper와 실제 runtime consumer를 혼동하지 않는다.
-- 각 capability는 **D1 first-release required**, **D1 deferred (후속 Stage 또는 task)**, **Cloudflare profile explicit unsupported**, **local MariaDB-only operational path** 중 하나로 disposition을 정한다. required가 아닌 기능은 reason, affected endpoint/flow, user-visible/profile guard requirement를 반드시 기록한다.
-- Stage 1은 D1 schema, Go provider, Worker, Container source/artifact를 만들지 않는다. inventory review와 승인 후에만 Stage 2 이후의 D1 vertical slice와 artifact scope를 확정한다.
+- `store.Store` base method와 public optional interface 84개, MariaDB implementation 26개, migration/schema, runtime consumer를 계속 전수 기록한다.
+- `R/D/U` first-release disposition을 제거하고 `P`(functional parity target)와 `C`/`V`/`O` implementation gate를 분리한다. 일반 사용자 capability와 local runtime이 제공하는 operator capability 모두 P다.
+- lorebook, rollback/reroll, memory admission/outbox/recovery, status/world projection, persona/entity memory, explorer mutation, reference/canon/source discovery, migration/worldline을 난도만으로 unsupported/profile guard 처리하지 않는다.
+- `ShadowStatusReporter` 같은 local dual-write 내부 진단만 N/A로 기록한다. Cloudflare product route의 capability absence, silent no-op, partial write는 허용하지 않는다.
+- Stage 1은 D1 schema, Go provider, Worker, Container source/artifact를 만들지 않는다. Stage 2 이후 구현 순서는 gate map이 정하되 어떤 P row도 permanent unsupported로 축소하지 않는다.
 
 ### 검증
 
@@ -48,13 +56,13 @@ cd ..
 git diff --check
 ```
 
-- `store.go`, 모든 `mariadb*.go`, MariaDB migration/schema, `internal/httpapi` 및 runtime/bootstrap consumer를 cross-check하여 matrix entry가 누락되지 않았는지 review한다.
-- capability matrix의 모든 row에는 implementation source, consumer classification, table/transaction dependency, D1 disposition과 decision rationale이 있어야 한다.
+- interface 84개와 production MariaDB implementation 26개가 matrix에 모두 있는지 다시 cross-check한다.
+- 모든 row에 implementation source, consumer, table/transaction dependency, P와 C/V/O gate가 기록됐는지 review한다.
 
 ### 커밋
 
 ```text
-Task #1 Stage 1: MariaDB capability inventory 확정
+Task #1 Stage 1: Cloudflare parity gate map 정정
 ```
 
 ## Stage 2 — Provider-neutral bootstrap과 Worker bridge contract
@@ -82,11 +90,11 @@ Task #1 Stage 1: MariaDB capability inventory 확정
 
 ### 변경 내용
 
-- 기존 local runtime profile/store/vector mode의 default와 validation을 유지하면서, 명시 opt-in Cloudflare runtime profile과 provider-neutral dependency/health representation을 추가한다.
-- Go bridge client는 virtual host outbound binding만 사용한다. bridge URL, request timeout, request/response envelope, status-to-error mapping은 환경변수/HTTP contract로 고정하고 Cloudflare API token·D1/Vectorize SDK를 Go에 넣지 않는다.
-- Worker는 Container request를 virtual hostname으로 받으며 D1/Vectorize binding handler를 내부 route로 분기한다. Stage 2에서는 request validation, versioning, error mapping, health/ping surface와 mockable D1 bridge operation만 확정한다.
-- tracked Wrangler template에는 stable binding names와 non-account-specific settings만 둔다. `account_id`, D1 resource ID, route/domain, token/secret은 넣지 않으며, `.gitignore`로 local/generated deploy config를 제외한다.
-- health/readiness 응답은 local MariaDB/Chroma labels와 behavior를 보존한 채 cloud provider status를 별도 표현한다. 아직 D1/Vectorize가 준비되지 않은 Cloudflare profile은 ready가 되지 않아야 한다.
+- 기존 local runtime profile/store/vector mode의 default와 validation을 유지하면서 명시 opt-in Cloudflare profile과 provider-neutral dependency/health representation을 추가한다.
+- Go bridge client는 virtual-host outbound binding만 사용한다. timeout, versioned request/response envelope, status-to-error mapping은 generic operation contract로 고정하고 Cloudflare API token·D1/Vectorize SDK를 Go에 넣지 않는다.
+- Worker는 Container request를 virtual hostname으로 받아 D1/Vectorize binding handler로 분기한다. Stage 2에서 canonical query/transaction, vector mutation/query, operator job/administration을 전달할 수 있는 authorization context와 error contract를 정하되 data feature를 구현하지 않는다.
+- tracked Wrangler template에는 stable binding names와 non-account-specific settings만 둔다. account ID, D1 resource ID, route/domain, token/secret은 넣지 않으며 ignored/local or protected values로 temporary deploy config를 생성한다.
+- health/readiness는 local MariaDB/Chroma labels와 behavior를 보존한다. parity gates가 미완료인 Cloudflare profile은 functional deployment ready를 보고하지 않는다.
 
 ### 검증
 
@@ -107,56 +115,49 @@ git diff --check
 Task #1 Stage 2: Cloudflare bridge와 runtime bootstrap 추가
 ```
 
-## Stage 3 — D1 canonical vertical slice
+## Stage 3 — D1 canonical parity
 
 ### 산출물
 
-신규:
+신규 또는 확장:
 
-- `deploy/cloudflare/migrations/0001_canonical_vertical_slice.sql`
-- `go-service/internal/store/d1.go`
-- `go-service/internal/store/d1_chat_memory.go`
-- `go-service/internal/store/d1_memory_derivation.go`
-- `go-service/internal/store/d1_test.go`
-- `go-service/internal/store/d1_chat_memory_test.go`
-- `go-service/internal/store/d1_memory_derivation_test.go`
+- `deploy/cloudflare/migrations/*.sql`
+- `go-service/internal/store/d1.go`, `d1_*.go` 및 동등한 D1 Store contract tests
 
 수정:
 
 - `deploy/cloudflare/worker/src/index.ts`
 - `go-service/internal/store/store.go`
 - `go-service/internal/httpapi/server.go`
-- `go-service/internal/httpapi/group_turn_complete.go`
-- `go-service/internal/httpapi/group_turn_prepare.go`
-- `go-service/internal/httpapi/*_test.go` 중 D1 runtime contract가 필요한 파일
+- complete-turn, prepare-turn, rollback, state/world, persona, lorebook/reference, explorer, session route 및 관련 `*_test.go`
 
 ### 변경 내용
 
-- D1 migration은 Stage 1 inventory에서 first-release required로 승인된 canonical tables, source revision/outbox, session-scoped indexes만 정의한다. MariaDB migration inventory는 변경하지 않는다.
-- D1 Store는 Stage 1 matrix에서 required로 확정된 `store.Store` capability를 충족한다. deferred 또는 unsupported capability는 matrix의 disposition에 따라 명시 capability check/`ErrNotEnabled` 또는 profile guard로 노출하며 silent no-op으로 만들지 않는다.
-- canonical write는 source revision/idempotency key 및 outbox enqueue를 D1 transaction contract로 묶는다. MariaDB lock/upsert/last-insert-id SQL을 재사용하지 않으며, D1-compatible statement와 deterministic IDs를 사용한다.
-- complete-turn 및 prepare-turn에서 D1 profile이 normal chat persistence와 canonical recall materialization을 수행하도록 연결한다. MariaDB/fixture/noop routes와 policy는 변경하지 않는다.
+- D1 migrations와 Store provider는 모든 `C` gate canonical rows를 지원한다. immutable ledger만 구현하는 minimal slice는 Cloudflare parity release가 아니다.
+- normal turn, prepare-turn lorebook/persona/state/world, entity identity, rollback/reroll, explorer mutation, reference/canon data, session/worldline data와 operator-readable canonical records가 local과 같은 observable result를 낸다.
+- canonical write는 source revision/idempotency key와 outbox enqueue를 D1 transaction contract로 묶는다. MariaDB lock/upsert/last-insert-id SQL을 재사용하지 않으며 D1-compatible statement, deterministic IDs, retry policy를 사용한다.
+- `O` capability의 authorization/audit procedure는 Stage 5에서 완료하되, 그 data model과 atomic persistence contract는 이 단계에서 제공한다.
 
 ### 검증
 
 ```bash
 cd go-service
 go test ./internal/store ./internal/httpapi ./internal/config -count=1
-go test ./... -run 'D1|Cloudflare|PrepareTurn|CompleteTurn|Memory' -count=1
+go test ./... -run 'D1|Cloudflare|PrepareTurn|CompleteTurn|Rollback|Lorebook|Persona|State|Session' -count=1
 cd ..
 git diff --check
 ```
 
-- bridge mock으로 D1 batch/transaction failure, idempotent replay, source revision conflict, rollback, session isolation을 검증한다.
-- MariaDB store unit tests와 local runtime config tests가 그대로 통과함을 확인한다.
+- bridge mock으로 D1 batch/transaction failure, idempotent replay, source revision conflict, rollback, JSON/current projection, session isolation을 검증한다.
+- MariaDB Store unit tests와 local runtime config tests가 그대로 통과함을 확인한다.
 
 ### 커밋
 
 ```text
-Task #1 Stage 3: D1 canonical vertical slice 추가
+Task #1 Stage 3: D1 canonical parity 추가
 ```
 
-## Stage 4 — Vectorize recall consistency
+## Stage 4 — Vectorize semantic parity
 
 ### 산출물
 
@@ -172,35 +173,33 @@ Task #1 Stage 3: D1 canonical vertical slice 추가
 - `go-service/internal/vector/vector.go`
 - `go-service/internal/httpapi/prepare_turn_recall.go`
 - `go-service/internal/httpapi/memory_vector_outbox_processor.go`
-- `go-service/internal/httpapi/group_turn_prepare.go`
-- `go-service/internal/httpapi/*_test.go` 중 vector/outbox recovery contract가 필요한 파일
+- memory admission, precise memory, explorer mutation, session migration/recovery 및 관련 tests
 
 ### 변경 내용
 
-- Vectorize provider는 Go bridge를 통해 search/upsert/delete/query health를 호출하며, only vector IDs, embeddings, and minimal filterable metadata를 송신한다. canonical text/payload는 D1 read로 hydrate한다.
-- Chroma expression filter에 직접 의존하지 않는 provider-neutral filter representation 또는 provider-side translation boundary를 만든다. existing Chroma behavior/test fixtures를 보존한다.
-- outbox completion은 Vectorize mutation acknowledgement와 immediate query readback을 분리한다. D1 outbox retry/lease states, D1 recent-memory fallback, source revision filtering, stable vector-document ID deduplication을 적용한다.
-- delete session과 rebuild는 D1 canonical rows를 source of truth로 삼으며, Vectorize query visibility delay가 user recall correctness를 손상시키지 않도록 한다.
+- Vectorize provider는 Go bridge를 통해 search/upsert/delete/query health를 호출하고 vector ID, embedding, minimal filter metadata만 송신한다. canonical text/payload는 D1에서 hydrate한다.
+- outbox completion은 Vectorize mutation acknowledgement와 query visibility를 분리한다. D1 outbox retry/lease states, D1 recent-memory fallback, source revision filtering, stable vector-document ID deduplication을 적용한다.
+- precise/admission memory, reprocessing, recovery, explorer supersession, session migration vector parity, delete/rebuild가 local Chroma 경험과 같은 결과를 내도록 한다.
 
 ### 검증
 
 ```bash
 cd go-service
 go test ./internal/vector ./internal/httpapi ./internal/store -count=1
-go test ./... -run 'Vectorize|Outbox|Recall|Rebuild|Recovery|Dedup' -count=1
+go test ./... -run 'Vectorize|Outbox|Recall|Rebuild|Recovery|Dedup|Reprocess|Migration' -count=1
 cd ..
 git diff --check
 ```
 
-- delayed Vectorize visibility, mutation failure/retry, duplicate ID, D1 fallback, session isolation, delete/rebuild and Chroma regression을 mock contract로 검증한다.
+- delayed Vectorize visibility, mutation failure/retry, duplicate ID, D1 fallback, session isolation, delete/rebuild, reprocessing/recovery와 Chroma regression을 mock contract로 검증한다.
 
 ### 커밋
 
 ```text
-Task #1 Stage 4: Vectorize recall consistency 추가
+Task #1 Stage 4: Vectorize semantic parity 추가
 ```
 
-## Stage 5 — Container artifact·호환성·운영 문서
+## Stage 5 — Operator parity·Container artifact·운영 문서
 
 ### 산출물
 
@@ -210,23 +209,21 @@ Task #1 Stage 4: Vectorize recall consistency 추가
 - `deploy/cloudflare/container/.dockerignore`
 - `deploy/cloudflare/README.md`
 - `deploy/cloudflare/scripts/render-wrangler-config.mjs`
-- 필요한 Cloudflare artifact static validation test 또는 script
+- 필요한 operator/admin artifact validation test 또는 script
 
 수정:
 
 - `README.md`
 - `deploy/cloudflare/wrangler.template.toml`
 - `deploy/cloudflare/.gitignore`
-- `go-service/internal/httpapi/group_health.go` 및 관련 tests
+- admin reset/export, session migration/stitch/worldline, vector recovery/reindex, source discovery, canon administration, health/readiness route와 관련 tests
 - 필요한 CI/build configuration
 
 ### 변경 내용
 
-- Container artifact는 Go backend를 stateless로 실행하고, product data·migration state·queue/session state를 local filesystem에 쓰지 않도록 명시한다.
-- Worker configuration template은 D1, Vectorize, Container binding 이름과 outbound virtual host mapping만 선언하며 account ID, resource ID, route/domain, secret/API token은 sample·source·image에 넣지 않는다.
-- predeploy renderer는 CI protected variables 또는 gitignore된 local values만 읽어 tracked tree 밖 temporary Wrangler config를 만들고, deploy command는 그 temporary config만 사용한다.
-- README는 Cloudflare option이 explicit opt-in이고 existing local MariaDB/Chroma mode와 공존함을 설명한다. Cloudflare guide는 account-neutral template, required deploy-time variable names, binding names, D1 migration, Worker/Container build/deploy, health verification, Vectorize rebuild, local/remote test boundary를 설명한다.
-- provider-neutral readiness/health surface, artifact configuration and test results are aligned with the documented procedure.
+- reset, snapshot/export, migration/stitch/worldline, source discovery, canon registry/pack, repair/recovery와 maintenance job을 Cloudflare에서 동등하게 수행한다. Worker-admin authorization, audit, confirmation, idempotent job state, D1 recovery and Vectorize reconciliation을 구현한다.
+- Container artifact는 Go backend를 stateless로 실행한다. product data, migration state, queue/job state, user setting은 image/layer/local filesystem에 두지 않는다.
+- deploy renderer는 account/resource IDs, routes, secrets를 ignored/protected input에서 temporary config로만 materialize한다. README/runbook은 normal deployment와 admin recovery/migration procedures, local compatibility와 remote-test boundary를 구분해 문서화한다.
 
 ### 검증
 
@@ -235,51 +232,28 @@ node --check "Archive Center.js"
 cd go-service
 go test ./... -count=1
 cd ..
+# project-standard container build command and Worker static check
 git diff --check
-git status --short
 ```
 
-- Worker/container configuration은 binding names, outbound host routes, no direct Go Cloudflare credential, no persistent container filesystem use를 review한다. tracked template/source/image에 account ID, resource ID, route/domain, token/secret이 없는지도 static check한다.
-- Cloudflare account credentials와 resource mapping이 CI protected variables 또는 ignored local values로 제공된 경우에만 remote D1/Vectorize/Container integration smoke를 실행하고, 제공되지 않으면 local/mocked boundary와 미실행 이유를 final report에 기록한다.
+- operator authorization/confirmation/audit, reset/export, migration/recovery/source/canon job contracts, Container restart persistence boundary, tracked artifact account-neutral scan, full local regression을 검증한다.
+- Cloudflare credentials가 있으면 authenticated remote integration을 추가로 실행한다. 없으면 remote execution은 문서화된 미실행 boundary로 남기며 성공을 주장하지 않는다.
 
 ### 커밋
 
 ```text
-Task #1 Stage 5: Cloudflare deployment compatibility 문서화
+Task #1 Stage 5: Cloudflare operator parity와 배포 문서 추가
 ```
 
-## 검증
+## 공통 리스크와 금지 사항
 
-- 각 Stage 검증 명령은 해당 Stage 완료보고서 작성 전에 실행한다.
-- 실패한 검증은 Stage 완료로 처리하지 않는다. 계획된 capability 범위나 artifact layout을 바꿔야 하면 구현계획서를 먼저 갱신하고 승인을 다시 받는다.
-- all-stage integration evidence는 MariaDB/Chroma local regression, D1 canonical persistence, Vectorize fallback/dedup/rebuild, Container restart persistence boundary, provider-neutral readiness/health를 포함한다.
-- remote tests are optional and must never be represented as executed without supplied Cloudflare credentials and observed results.
-
-## 커밋
-
-- 각 Stage는 source/artifact changes와 `mydocs/working/task_m470_1_stage{N}.md` 완료보고서를 함께 커밋한다.
-- Stage commit은 순서대로 `Task #1 Stage {N}: ...` 형식을 사용한다.
-- 구현계획서는 본 승인 요청을 위해 별도 커밋으로 보존한다.
-
-## 단계 의존성
-
-- Stage 2는 Stage 1의 MariaDB capability matrix와 D1 first-release disposition이 review·승인된 뒤에만 시작한다.
-- Stage 3은 Stage 2의 runtime profile, bridge envelope, error mapping이 확정된 뒤에만 시작한다.
-- Stage 4는 Stage 3의 D1 canonical rows/outbox contract가 검증된 뒤에만 시작한다.
-- Stage 5는 Stage 4의 provider/readiness semantics가 검증되고 documentation procedure가 그 실제 artifact와 일치할 때만 시작한다.
-
-## 위험과 대응
-
-- **D1 Store contract broadness**: base Store and optional interfaces have wide surface area. Stage 1 inventories every actual MariaDB consumer and its schema/SQL dependency before a D1 disposition is approved; Stage 3 then tests every required live call path. Full parity is not silently claimed.
-- **Worker bridge semantics**: D1 transaction/batch and Vectorize API response/error shapes may differ from assumptions. Keep a versioned envelope with contract tests before provider wiring.
-- **Eventual Vectorize visibility**: do not gate canonical turn success on immediate vector query. Use D1 outbox state plus recall fallback/dedup and recovery tests.
-- **Artifact drift**: Worker configuration, Container image, and documentation can diverge. Stage 5 static review must test declared host/binding names, account-neutral templates, and the absence of credential/resource embedding.
-- **Account-specific configuration leakage**: `account_id`, D1 resource IDs, domains/routes, or secrets in committed files would bind the artifact to one account and leak deployment details. Use stable binding names, ignored/local or protected deployment values, and a temporary rendered config only.
-- **Local compatibility regression**: run targeted and full Go tests plus JavaScript syntax validation; do not alter MariaDB/Chroma default selection.
+- D1/SQLite concurrency는 MariaDB의 `FOR UPDATE`, MySQL upsert, JSON predicate와 다르다. 각 `C` row마다 transaction/retry/idempotency test 없이는 parity 완료로 선언하지 않는다.
+- Vectorize eventual consistency는 D1 fallback/outbox/dedup/rebuild로 다룬다. Vectorize를 canonical truth로 쓰거나 immediate readback을 완료 조건으로 요구하지 않는다.
+- Container은 Cloudflare API token REST를 호출하지 않고 Worker bridge만 사용한다.
+- account-specific ID, secret, domain/route를 tracked source/template/image에 넣지 않는다.
+- `ErrNotEnabled`/profile guard는 local-only shadow diagnostic 또는 권한 없는 관리 호출의 명시 응답에만 사용한다. 동일 경험 target인 Cloudflare capability의 구현 생략 수단으로 쓰지 않는다.
 
 ## 승인 요청 사항
 
-- 위 5개 Stage의 순서, 파일 범위, verification gates, and commit boundaries를 승인해 주세요.
-- Stage 1에서 MariaDB Store capability·consumer·canonical table·SQL/transaction semantic을 전수 inventory하고, 그 D1 disposition을 별도 review/approval한 뒤에만 vertical slice를 확정하는 것을 승인해 주세요.
-- 계정 중립 `wrangler.template.toml`과 temporary deploy config renderer를 사용하고, account/resource IDs·routes·tokens·secrets를 source control에서 제외하는 deployment configuration boundary를 승인해 주세요.
-- Stage 1 inventory 문서와 Stage 1 완료보고서 작성을 시작해도 되는지 승인해 주세요.
+- 수정된 Stage 1 parity model(P/C/V/O)과 5개 Stage 순서, 파일 범위, verification gate, commit boundary를 승인해 주세요.
+- Stage 1 정정 후 Stage 2로 진행하려면 **`Stage 1 정정 승인, Stage 2 시작`**이라고 명시해 주세요.
