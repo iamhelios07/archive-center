@@ -32,9 +32,15 @@ func TestGeneratedSchemaMatchesTrackedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tracked schema: %v", err)
 	}
-	if !bytes.Equal(rendered, tracked) {
+	// Normalise line endings before comparing: the generator always emits LF, and
+	// a checkout with core.autocrlf enabled may materialise CRLF in the working
+	// tree. .gitattributes pins this path to eol=lf, but the comparison stays
+	// robust so a contributor's local git settings cannot produce a false stale
+	// report.
+	trackedLF := bytes.ReplaceAll(tracked, []byte("\r\n"), []byte("\n"))
+	if !bytes.Equal(rendered, trackedLF) {
 		t.Fatalf("tracked D1 schema is stale: %s differs from generator output (%d vs %d bytes). Re-run: cd go-service; go run ./cmd/d1-schema-gen",
-			trackedSchemaPath, len(tracked), len(rendered))
+			trackedSchemaPath, len(trackedLF), len(rendered))
 	}
 }
 

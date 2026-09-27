@@ -84,6 +84,89 @@ function bindingState(binding: unknown): "bound" | "missing" {
   return binding === undefined || binding === null ? "missing" : "bound";
 }
 
+// ---------------------------------------------------------------------------
+// D1 handlers
+// ---------------------------------------------------------------------------
+
+/** A malformed request, as opposed to a failing database operation. */
+class D1RequestError extends Error {}
+
+function asArgs(value: unknown): unknown[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new D1RequestError("args must be an array");
+  }
+  return value;
+}
+
+function requireSQL(value: unknown, operation: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new D1RequestError(`${operation} requires a non-empty sql string`);
+  }
+  return value;
+}
+
+/**
+ * d1.query runs one parameterised read and returns a column list plus row
+ * arrays. Columns come from the first row so the Go client can scan by position;
+ * an empty result carries no columns, which the client reports as "no rows".
+ */
+async function runD1Query(env: Env, payload: unknown): Promise<unknown> {
+  const request = (payload ?? {}) as { sql?: unknown; args?: unknown };
+  const sql = requireSQL(request.sql, "d1.query");
+  const result = await env.DB.prepare(sql)
+    .bind(...asArgs(request.args))
+    .all();
+  const rows = (result.results ?? []) as Record<string, unknown>[];
+  const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+  const values = rows.map((row) => columns.map((column) => (row[column] === undefined ? null : row[column])));
+  return { columns, rows: values };
+}
+
+/**
+ * d1.batch runs statements as one D1 transaction. D1 rolls the whole batch back
+ * when any statement fails, which is the atomicity the canonical write and the
+ * resumable reset both rely on. Only committed row counts are reported.
+ */
+async function runD1Batch(env: Env, payload: unknown): Promise<unknown> {
+  const request = (payload ?? {}) as { statements?: unknown };
+  if (!Array.isArray(request.statements) || request.statements.length === 0) {
+    throw new D1RequestError("d1.batch requires a non-empty statements array");
+  }
+  const prepared = request.statements.map((raw) => {
+    const statement = (raw ?? {}) as { sql?: unknown; args?: unknown };
+    return env.DB.prepare(requireSQL(statement.sql, "d1.batch statement")).bind(...asArgs(statement.args));
+  });
+  const results = await env.DB.batch(prepared);
+  return {
+    changes: results.map((result) => {
+      const changes = (result.meta as { changes?: unknown } | undefined)?.changes;
+      return typeof changes === "number" ? changes : 0;
+    }),
+  };
+}
+
+async function dispatchD1(
+  env: Env,
+  request: BridgeRequest,
+  run: (env: Env, payload: unknown) => Promise<unknown>,
+): Promise<{ status: number; body: BridgeResponse }> {
+  try {
+    const result = await run(env, request.payload);
+    return { status: 200, body: { version: ENVELOPE_VERSION, id: request.id, ok: true, result } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof D1RequestError) {
+      return { status: 200, body: envelopeError(request.id, "d1_request_invalid", message, false) };
+    }
+    // A failing D1 operation is reported as retryable: reads are idempotent and
+    // a batch is transactional, so a bounded retry cannot duplicate work.
+    return { status: 200, body: envelopeError(request.id, "d1_execution_failed", message, true) };
+  }
+}
+
 async function dispatch(env: Env, request: BridgeRequest): Promise<{ status: number; body: BridgeResponse }> {
   switch (request.operation) {
     case "bridge.ping":
@@ -110,13 +193,17 @@ async function dispatch(env: Env, request: BridgeRequest): Promise<{ status: num
           },
         },
       };
+    case "d1.query":
+      return dispatchD1(env, request, runD1Query);
+    case "d1.batch":
+      return dispatchD1(env, request, runD1Batch);
     default:
       return {
         status: 200,
         body: envelopeError(
           request.id,
           "not_implemented",
-          `operation ${JSON.stringify(request.operation)} is not implemented in this stage; canonical D1 operations land in Stage 3, vector operations in Stage 4, and operator jobs in Stage 5`,
+          `operation ${JSON.stringify(request.operation)} is not implemented in this stage; canonical D1 query/batch are available, vector operations land in Stage 4, and operator jobs in Stage 5`,
           false,
         ),
       };

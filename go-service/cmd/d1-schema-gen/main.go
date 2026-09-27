@@ -69,7 +69,12 @@ func generate(migrationsDir string) ([]byte, schemaStats, error) {
 		if err != nil {
 			return nil, schemaStats{}, fmt.Errorf("read %s: %w", path, err)
 		}
-		for _, stmt := range splitStatements(string(content)) {
+		// Normalise line endings before parsing. Some MariaDB migrations are
+		// declared eol=crlf in .gitattributes, so a checkout can hand us CRLF
+		// while another hands us LF. Without this the generated schema would
+		// depend on the checkout's line endings and stop being reproducible.
+		normalised := strings.ReplaceAll(string(content), "\r\n", "\n")
+		for _, stmt := range splitStatements(normalised) {
 			if err := schema.apply(stmt, filepath.Base(path)); err != nil {
 				return nil, schemaStats{}, fmt.Errorf("%s: %w", filepath.Base(path), err)
 			}
