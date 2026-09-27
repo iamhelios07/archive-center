@@ -549,3 +549,192 @@ func TestD1StoreTimeParsing(t *testing.T) {
 		t.Error("parseD1Time must reject an unparseable timestamp")
 	}
 }
+
+// TestD1StorePendingThreadStatusFiltering pins the three status lanes the MariaDB
+// path exposes: an explicit status, "all", and the default open/paused set.
+func TestD1StorePendingThreadStatusFiltering(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+	rows := []struct {
+		key    string
+		status string
+		source int
+		pinned int
+	}{
+		{"open-1", "open", 2, 0},
+		{"paused-1", "paused", 3, 0},
+		{"resolved-1", "resolved", 4, 0},
+		{"closed-1", "closed", 5, 0},
+		{"pinned-1", "open", 1, 1},
+	}
+	for _, row := range rows {
+		if _, err := conn.Exec(ctx, `INSERT INTO pending_threads
+			(chat_session_id, thread_key, status, source_turn, pinned)
+			VALUES ('s1', ?, ?, ?, ?)`, row.key, row.status, row.source, row.pinned); err != nil {
+			t.Fatalf("seed %s: %v", row.key, err)
+		}
+	}
+
+	defaultLanes, err := st.ListPendingThreads(ctx, "s1", "")
+	if err != nil {
+		t.Fatalf("ListPendingThreads default: %v", err)
+	}
+	if len(defaultLanes) != 3 {
+		t.Fatalf("default lanes = %d, want 3 (open/paused)", len(defaultLanes))
+	}
+	// pinned DESC dominates, then source_turn DESC.
+	if defaultLanes[0].ThreadKey != "pinned-1" {
+		t.Errorf("first row = %q, want the pinned thread first", defaultLanes[0].ThreadKey)
+	}
+	if defaultLanes[1].ThreadKey != "paused-1" || defaultLanes[2].ThreadKey != "open-1" {
+		t.Errorf("source_turn DESC ordering broken: %q, %q", defaultLanes[1].ThreadKey, defaultLanes[2].ThreadKey)
+	}
+
+	all, err := st.ListPendingThreads(ctx, "s1", "all")
+	if err != nil {
+		t.Fatalf("ListPendingThreads all: %v", err)
+	}
+	if len(all) != 5 {
+		t.Errorf("all = %d, want 5", len(all))
+	}
+
+	explicit, err := st.ListPendingThreads(ctx, "s1", "resolved")
+	if err != nil {
+		t.Fatalf("ListPendingThreads resolved: %v", err)
+	}
+	if len(explicit) != 1 || explicit[0].ThreadKey != "resolved-1" {
+		t.Errorf("explicit status filter = %+v", explicit)
+	}
+}
+
+func TestD1StoreActiveStatesAndCanonicalLayers(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	for i, spec := range []struct {
+		stateType string
+		turn      int
+	}{{"mood", 1}, {"mood", 3}, {"location", 2}} {
+		if _, err := conn.Exec(ctx, `INSERT INTO active_states
+			(chat_session_id, state_type, content, turn_index) VALUES ('s1', ?, ?, ?)`,
+			spec.stateType, "content", spec.turn); err != nil {
+			t.Fatalf("seed active state %d: %v", i, err)
+		}
+	}
+
+	allStates, err := st.ListActiveStates(ctx, "s1", "")
+	if err != nil {
+		t.Fatalf("ListActiveStates all: %v", err)
+	}
+	if len(allStates) != 3 {
+		t.Fatalf("active states = %d, want 3", len(allStates))
+	}
+	if allStates[0].TurnIndex != 3 {
+		t.Errorf("turn_index DESC ordering broken: first turn = %d", allStates[0].TurnIndex)
+	}
+
+	moods, err := st.ListActiveStates(ctx, "s1", "mood")
+	if err != nil {
+		t.Fatalf("ListActiveStates mood: %v", err)
+	}
+	if len(moods) != 2 {
+		t.Errorf("mood states = %d, want 2", len(moods))
+	}
+
+	// canonical_state_layers carries nullable numeric columns that must read as
+	// zero rather than failing the scan.
+	if _, err := conn.Exec(ctx, `INSERT INTO canonical_state_layers
+		(chat_session_id, layer_type, content, turn_index) VALUES ('s1', 'summary', 'c', 7)`); err != nil {
+		t.Fatalf("seed layer: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO canonical_state_layers
+		(chat_session_id, layer_type, content, source_state_type, turn_index, source_turn, source_record, last_verified_turn, confidence)
+		VALUES ('s1', 'detail', 'c', 'mood', 8, 4, 42, 5, 0.75)`); err != nil {
+		t.Fatalf("seed detailed layer: %v", err)
+	}
+
+	layers, err := st.ListCanonicalStateLayers(ctx, "s1", "")
+	if err != nil {
+		t.Fatalf("ListCanonicalStateLayers: %v", err)
+	}
+	if len(layers) != 2 {
+		t.Fatalf("layers = %d, want 2", len(layers))
+	}
+	if layers[0].TurnIndex != 8 || layers[0].SourceRecord != 42 || layers[0].Confidence != 0.75 {
+		t.Errorf("detailed layer did not round-trip: %+v", layers[0])
+	}
+	if layers[1].SourceStateType != "" || layers[1].SourceRecord != 0 || layers[1].Confidence != 0 {
+		t.Errorf("NULL numeric layer columns must read as zero: %+v", layers[1])
+	}
+
+	details, err := st.ListCanonicalStateLayers(ctx, "s1", "detail")
+	if err != nil {
+		t.Fatalf("ListCanonicalStateLayers detail: %v", err)
+	}
+	if len(details) != 1 || details[0].LayerType != "detail" {
+		t.Errorf("layer filter = %+v", details)
+	}
+}
+
+func TestD1StoreEpisodeSummaries(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	for _, spec := range []struct {
+		from, to int
+	}{{1, 5}, {6, 10}, {11, 20}} {
+		if _, err := conn.Exec(ctx, `INSERT INTO episode_summaries
+			(chat_session_id, from_turn, to_turn, summary_text, key_entities, embedding_model)
+			VALUES ('s1', ?, ?, ?, '["a"]', 'm1')`, spec.from, spec.to, "summary"); err != nil {
+			t.Fatalf("seed episode: %v", err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO episode_summaries
+		(chat_session_id, from_turn, to_turn, summary_text) VALUES ('s2', 1, 2, 'other')`); err != nil {
+		t.Fatalf("seed other session: %v", err)
+	}
+
+	all, err := st.ListEpisodeSummaries(ctx, "s1", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("ListEpisodeSummaries: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("episodes = %d, want 3", len(all))
+	}
+	if all[0].ToTurn != 20 {
+		t.Errorf("to_turn DESC ordering broken: first = %d", all[0].ToTurn)
+	}
+	if all[0].KeyEntities != `["a"]` || all[0].EmbeddingModel != "m1" {
+		t.Errorf("nullable columns did not round-trip: %+v", all[0])
+	}
+	if all[2].OpenLoopsJSON != "" || all[2].EmbeddingVector != "" {
+		t.Errorf("NULL text columns must read as empty: %+v", all[2])
+	}
+
+	limited, err := st.ListEpisodeSummaries(ctx, "s1", 2, 0, 0)
+	if err != nil {
+		t.Fatalf("limited ListEpisodeSummaries: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Errorf("limit = %d, want 2", len(limited))
+	}
+
+	bounded, err := st.ListEpisodeSummaries(ctx, "s1", 0, 6, 15)
+	if err != nil {
+		t.Fatalf("bounded ListEpisodeSummaries: %v", err)
+	}
+	if len(bounded) != 1 || bounded[0].FromTurn != 6 {
+		t.Errorf("range filter = %+v", bounded)
+	}
+
+	fetched, err := st.GetEpisodeSummary(ctx, all[0].ID)
+	if err != nil {
+		t.Fatalf("GetEpisodeSummary: %v", err)
+	}
+	if fetched.ID != all[0].ID || fetched.SummaryText != "summary" {
+		t.Errorf("GetEpisodeSummary = %+v", fetched)
+	}
+	if _, err := st.GetEpisodeSummary(ctx, 999999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing episode error = %v, want ErrNotFound", err)
+	}
+}

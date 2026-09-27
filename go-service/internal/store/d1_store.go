@@ -561,6 +561,198 @@ func (s *d1Store) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 }
 
 // ---------------------------------------------------------------------------
+// pending threads
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) ListPendingThreads(ctx context.Context, chatSessionID, status string) ([]PendingThread, error) {
+	// Status filtering mirrors the MariaDB path: an explicit status selects it,
+	// "all" selects everything, and an empty status defaults to the open lanes.
+	query := `
+		SELECT id, chat_session_id, thread_key, description, status, created_turn, resolved_turn,
+			   source_turn, priority, hook_type, hook_metadata_json, pinned, suppressed, user_corrected,
+			   created_at, updated_at
+		FROM pending_threads
+		WHERE chat_session_id = ?
+	`
+	args := []any{chatSessionID}
+	switch {
+	case strings.TrimSpace(status) != "" && status != "all":
+		query += ` AND status = ?`
+		args = append(args, status)
+	case status == "":
+		query += ` AND status IN ('open', 'paused')`
+	}
+	query += ` ORDER BY pinned DESC, source_turn DESC, id DESC`
+
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PendingThread
+	for rows.Next() {
+		var item PendingThread
+		var description, hookType, hookMetadataJSON *string
+		var createdTurn, resolvedTurn, sourceTurn, priority *int64
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.ThreadKey, &description, &item.Status,
+			&createdTurn, &resolvedTurn, &sourceTurn, &priority, &hookType, &hookMetadataJSON,
+			&item.Pinned, &item.Suppressed, &item.UserCorrected, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.Description = d1DerefString(description)
+		item.CreatedTurn = int(d1DerefInt64(createdTurn))
+		item.ResolvedTurn = int(d1DerefInt64(resolvedTurn))
+		item.SourceTurn = int(d1DerefInt64(sourceTurn))
+		item.Priority = int(d1DerefInt64(priority))
+		item.HookType = d1DerefString(hookType)
+		item.HookMetadataJSON = d1DerefString(hookMetadataJSON)
+		hydratePendingThreadDerivedFields(&item)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// active states and canonical state layers
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) ListActiveStates(ctx context.Context, chatSessionID, stateType string) ([]ActiveState, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, chat_session_id, state_type, content, turn_index, created_at
+		FROM active_states
+		WHERE chat_session_id = ? AND (? = '' OR state_type = ?)
+		ORDER BY turn_index DESC, id DESC
+	`, chatSessionID, strings.TrimSpace(stateType), stateType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ActiveState
+	for rows.Next() {
+		var item ActiveState
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.StateType, &item.Content,
+			&item.TurnIndex, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *d1Store) ListCanonicalStateLayers(ctx context.Context, chatSessionID, layerType string) ([]CanonicalStateLayer, error) {
+	rows, err := s.conn.Query(ctx, `
+		SELECT id, chat_session_id, layer_type, content, source_state_type, turn_index, source_turn,
+			   source_record, last_verified_turn, confidence, created_at
+		FROM canonical_state_layers
+		WHERE chat_session_id = ? AND (? = '' OR layer_type = ?)
+		ORDER BY turn_index DESC, id DESC
+	`, chatSessionID, strings.TrimSpace(layerType), layerType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CanonicalStateLayer
+	for rows.Next() {
+		var item CanonicalStateLayer
+		var sourceStateType *string
+		var sourceTurn, sourceRecord, lastVerifiedTurn *int64
+		var confidence *float64
+		if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.LayerType, &item.Content,
+			&sourceStateType, &item.TurnIndex, &sourceTurn, &sourceRecord, &lastVerifiedTurn,
+			&confidence, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.SourceStateType = d1DerefString(sourceStateType)
+		item.SourceTurn = int(d1DerefInt64(sourceTurn))
+		item.SourceRecord = d1DerefInt64(sourceRecord)
+		item.LastVerifiedTurn = int(d1DerefInt64(lastVerifiedTurn))
+		item.Confidence = d1DerefFloat64(confidence)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// episode summaries
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) ListEpisodeSummaries(ctx context.Context, chatSessionID string, limit, fromTurn, toTurn int) ([]EpisodeSummary, error) {
+	query := `
+		SELECT id, chat_session_id, from_turn, to_turn, summary_text, key_entities, key_events,
+			   open_loops_json, relationship_changes_json, embedding_vector, embedding_model, created_at
+		FROM episode_summaries
+		WHERE chat_session_id = ? AND (? <= 0 OR from_turn >= ?) AND (? <= 0 OR to_turn <= ?)
+		ORDER BY to_turn DESC, id DESC
+	`
+	args := []any{chatSessionID, fromTurn, fromTurn, toTurn, toTurn}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []EpisodeSummary
+	for rows.Next() {
+		item, err := d1ScanEpisodeSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *d1Store) GetEpisodeSummary(ctx context.Context, episodeID int64) (*EpisodeSummary, error) {
+	var item EpisodeSummary
+	var keyEntities, keyEvents, openLoopsJSON, relationshipChangesJSON, embeddingVector, embeddingModel *string
+	err := s.conn.QueryRow(ctx, `
+		SELECT id, chat_session_id, from_turn, to_turn, summary_text, key_entities, key_events,
+			   open_loops_json, relationship_changes_json, embedding_vector, embedding_model, created_at
+		FROM episode_summaries
+		WHERE id = ?
+	`, episodeID).Scan(&item.ID, &item.ChatSessionID, &item.FromTurn, &item.ToTurn, &item.SummaryText,
+		&keyEntities, &keyEvents, &openLoopsJSON, &relationshipChangesJSON, &embeddingVector, &embeddingModel,
+		&item.CreatedAt)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, errD1NoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	d1ApplyEpisodeSummaryNullables(&item, keyEntities, keyEvents, openLoopsJSON, relationshipChangesJSON, embeddingVector, embeddingModel)
+	return &item, nil
+}
+
+// d1ScanEpisodeSummary reads one episode_summaries row from a cursor.
+func d1ScanEpisodeSummary(rows D1Rows) (EpisodeSummary, error) {
+	var item EpisodeSummary
+	var keyEntities, keyEvents, openLoopsJSON, relationshipChangesJSON, embeddingVector, embeddingModel *string
+	if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.FromTurn, &item.ToTurn, &item.SummaryText,
+		&keyEntities, &keyEvents, &openLoopsJSON, &relationshipChangesJSON, &embeddingVector, &embeddingModel,
+		&item.CreatedAt); err != nil {
+		return EpisodeSummary{}, err
+	}
+	d1ApplyEpisodeSummaryNullables(&item, keyEntities, keyEvents, openLoopsJSON, relationshipChangesJSON, embeddingVector, embeddingModel)
+	return item, nil
+}
+
+func d1ApplyEpisodeSummaryNullables(item *EpisodeSummary, keyEntities, keyEvents, openLoopsJSON, relationshipChangesJSON, embeddingVector, embeddingModel *string) {
+	item.KeyEntities = d1DerefString(keyEntities)
+	item.KeyEvents = d1DerefString(keyEvents)
+	item.OpenLoopsJSON = d1DerefString(openLoopsJSON)
+	item.RelationshipChangesJSON = d1DerefString(relationshipChangesJSON)
+	item.EmbeddingVector = d1DerefString(embeddingVector)
+	item.EmbeddingModel = d1DerefString(embeddingModel)
+}
+
+// ---------------------------------------------------------------------------
 // not yet implemented
 // ---------------------------------------------------------------------------
 
@@ -585,26 +777,6 @@ func (s *d1Store) ListCharacterStates(context.Context, string) ([]CharacterState
 }
 
 func (s *d1Store) GetCharacterState(context.Context, string, string) (*CharacterState, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListPendingThreads(context.Context, string, string) ([]PendingThread, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListActiveStates(context.Context, string, string) ([]ActiveState, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListCanonicalStateLayers(context.Context, string, string) ([]CanonicalStateLayer, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) ListEpisodeSummaries(context.Context, string, int, int, int) ([]EpisodeSummary, error) {
-	return nil, errD1Unimplemented
-}
-
-func (s *d1Store) GetEpisodeSummary(context.Context, int64) (*EpisodeSummary, error) {
 	return nil, errD1Unimplemented
 }
 
@@ -642,6 +814,15 @@ func d1BoolValue(value bool) int {
 // d1DerefInt64 renders a NULL integer column as 0, matching how the MariaDB path
 // reads nullable integer columns into plain int fields.
 func d1DerefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// d1DerefFloat64 renders a NULL real column as 0, matching how the MariaDB path
+// reads nullable float columns into plain float64 fields.
+func d1DerefFloat64(v *float64) float64 {
 	if v == nil {
 		return 0
 	}

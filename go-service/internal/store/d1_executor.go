@@ -265,6 +265,20 @@ func d1Assign(dest, value any) error {
 		}
 		*target = int(n)
 		return nil
+	case **float64:
+		// NULL stays distinguishable from 0 for optional numeric columns such as
+		// canonical_state_layers.confidence.
+		if value == nil {
+			*target = nil
+			return nil
+		}
+		f, err := d1ToFloat64(value)
+		if err != nil {
+			return err
+		}
+		copied := f
+		*target = &copied
+		return nil
 	case *float64:
 		f, err := d1ToFloat64(value)
 		if err != nil {
