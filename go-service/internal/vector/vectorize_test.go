@@ -141,13 +141,24 @@ type vectorizeFakeVector struct {
 }
 
 // vectorizeFakeIndex is an in-memory stand-in for the Vectorize binding. It
-// answers only what the frozen contract exposes: upsert by id, delete by id, a
-// filtered topK query with cosine scores, and binding presence.
+// answers only what the contract exposes: upsert by id, delete by id, an exact
+// get by id, a filtered topK query with cosine scores, and index geometry.
+//
+// It reproduces the two Vectorize behaviours that shaped this provider, because
+// both are load-bearing and neither is obvious from the contract:
+//
+//   - a query whose vector length differs from the index is REJECTED, which is
+//     what made a read-only enumeration impossible without a known dimension;
+//   - describe() is the only account-neutral way to learn that dimension.
 type vectorizeFakeIndex struct {
-	mu      sync.Mutex
-	order   []string
-	vectors map[string]vectorizeFakeVector
-	bound   bool
+	mu        sync.Mutex
+	order     []string
+	vectors   map[string]vectorizeFakeVector
+	bound     bool
+	dimension int
+	// geometryError reproduces a binding that is present but cannot describe
+	// itself, which is the state that leaves a cold process without a dimension.
+	geometryError bool
 }
 
 func newVectorizeFakeIndex(bound bool) *vectorizeFakeIndex {
@@ -161,6 +172,11 @@ func (i *vectorizeFakeIndex) put(id string, values []float32, meta map[string]an
 		i.order = append(i.order, id)
 	}
 	i.vectors[id] = vectorizeFakeVector{values: append([]float32(nil), values...), meta: meta}
+	// A real index is created with a fixed width and rejects everything else, so
+	// writing a document teaches the stub that width.
+	if i.dimension == 0 {
+		i.dimension = len(values)
+	}
 }
 
 func (i *vectorizeFakeIndex) size() int {
@@ -185,7 +201,16 @@ func (i *vectorizeFakeIndex) responder() func(vectorizeStubCall) (string, *vecto
 		case cloudflarebridge.OpVectorDelete:
 			result = i.remove(call.Payload)
 		case cloudflarebridge.OpVectorQuery:
-			result = i.query(call.Payload)
+			// The dimension rejection is modelled as a non-retryable execution
+			// failure, matching the Worker: a wrong-length vector can never be
+			// stored, so retrying it would spin.
+			queried, queryErr := i.query(call.Payload)
+			if queryErr != nil {
+				return "", &vectorizeStubFailure{Code: "vector_execution_failed", Message: queryErr.Error()}
+			}
+			result = queried
+		case cloudflarebridge.OpVectorGet:
+			result = i.get(call.Payload)
 		case cloudflarebridge.OpVectorHealth:
 			result = i.health()
 		default:
@@ -242,13 +267,19 @@ func (i *vectorizeFakeIndex) remove(payload map[string]any) any {
 	return map[string]any{"deleted": deleted}
 }
 
-func (i *vectorizeFakeIndex) query(payload map[string]any) any {
+func (i *vectorizeFakeIndex) query(payload map[string]any) (any, error) {
 	query := vectorizeStubFloat32List(payload["vector"])
 	topK := int(vectorizeStubFloat(payload["topK"]))
 	filter, _ := payload["filter"].(map[string]any)
 	includeValues, _ := payload["includeValues"].(bool)
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	// Vectorize rejects a query whose vector dimension differs from the index.
+	// Reproducing it is what makes a wrongly sized enumeration probe fail loudly
+	// instead of quietly returning nothing.
+	if i.dimension > 0 && len(query) > 0 && len(query) != i.dimension {
+		return nil, fmt.Errorf("Vectorize: the query vector has %d dimensions but the index is configured for %d", len(query), i.dimension)
+	}
 	matches := []map[string]any{}
 	for _, id := range i.order {
 		stored, exists := i.vectors[id]
@@ -278,13 +309,59 @@ func (i *vectorizeFakeIndex) query(payload map[string]any) any {
 	if topK > 0 && len(matches) > topK {
 		matches = matches[:topK]
 	}
-	return map[string]any{"matches": matches}
+	return map[string]any{"matches": matches}, nil
+}
+
+// get is the EXACT keyed read, not a similarity walk. It is exact in the way
+// that matters to the outbox: a document the index holds is always returned, and
+// only a document the index does not hold is absent.
+func (i *vectorizeFakeIndex) get(payload map[string]any) any {
+	ids, _ := payload["ids"].([]any)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	found := []map[string]any{}
+	for _, raw := range ids {
+		id := vectorizeStubString(raw)
+		stored, exists := i.vectors[id]
+		if !exists {
+			continue
+		}
+		values := make([]float64, len(stored.values))
+		for position, value := range stored.values {
+			values[position] = float64(value)
+		}
+		meta := stored.meta
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		found = append(found, map[string]any{"id": id, "values": values, "metadata": meta})
+	}
+	return map[string]any{"vectors": found}
 }
 
 func (i *vectorizeFakeIndex) health() any {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return map[string]any{"bound": i.bound, "version": "stub-index-1"}
+	if i.geometryError {
+		return map[string]any{"bound": i.bound, "version": "stub-index-1", "geometryError": true}
+	}
+	if !i.bound {
+		return map[string]any{"bound": false}
+	}
+	dimension := i.dimension
+	if dimension == 0 {
+		// The binding always knows its own dimension, so an index that has not
+		// been given one reports zero: an index nothing has ever been written to
+		// has no recorded width, and the Go side must not invent one.
+		for _, stored := range i.vectors {
+			dimension = len(stored.values)
+			break
+		}
+	}
+	return map[string]any{
+		"bound": true, "version": "stub-index-1",
+		"dimensions": dimension, "vectorCount": len(i.vectors),
+	}
 }
 
 func vectorizeFakeMetadataMatchesAll(stored map[string]any, filter map[string]any) bool {
@@ -885,8 +962,18 @@ func TestVectorizeRebuildRefusesInsteadOfPretending(t *testing.T) {
 	}
 }
 
+// TestVectorizeHealthReportsOnlyWhatTheTransportCanObserve pins that health
+// reports the index geometry now that the Worker can describe it, and still says
+// nothing it cannot observe.
+//
+// The previous version of this test asserted that the count and the dimension
+// were UNREPORTABLE, which was true of the contract as first written and is no
+// longer. The binding's describe() exposes both, and leaving them unreported
+// would have hidden a real index from the operator while the store could have
+// used them.
 func TestVectorizeHealthReportsOnlyWhatTheTransportCanObserve(t *testing.T) {
-	store, _, _ := newVectorizeIndexedStore(t)
+	store, index, _ := newVectorizeIndexedStore(t)
+	vectorizeSeedSession(t, index, "sess-1")
 	health, err := store.Health(context.Background())
 	if err != nil {
 		t.Fatalf("Health: %v", err)
@@ -894,18 +981,45 @@ func TestVectorizeHealthReportsOnlyWhatTheTransportCanObserve(t *testing.T) {
 	if health.Status != "ok" || !health.ModelReady {
 		t.Fatalf("health = %+v, want a ready binding", health)
 	}
-	if health.TotalCount != 0 {
-		t.Errorf("TotalCount = %d, want 0: this contract has no collection count", health.TotalCount)
+	if health.TotalCount != index.size() {
+		t.Errorf("TotalCount = %d, want the index-wide count %d", health.TotalCount, index.size())
 	}
 	if health.PersistDir != "" || health.ProjectModel != "" {
 		t.Errorf("health = %+v, want no local directory and no provider model", health)
 	}
-	joined := strings.Join(health.PreflightIssues, " | ")
-	if !strings.Contains(joined, "count") {
-		t.Errorf("preflight issues = %v, want the unobservable count reported", health.PreflightIssues)
+	// Nothing is unobservable any more, so a healthy index must not claim a
+	// problem. A stale preflight issue here would tell an operator to go looking
+	// for a fault that does not exist.
+	if len(health.PreflightIssues) != 0 {
+		t.Errorf("preflight issues = %v, want none for a describable healthy index", health.PreflightIssues)
 	}
-	if !strings.Contains(joined, "dimension") {
-		t.Errorf("preflight issues = %v, want the unobserved index dimension reported", health.PreflightIssues)
+
+	// A bound binding that cannot describe itself must still render, and must say
+	// which capability is missing: the consequence is specific, namely that
+	// enumeration fails on a cold process.
+	unreadable := newVectorizeWorkerStub(t, func(vectorizeStubCall) (string, *vectorizeStubFailure) {
+		return "", &vectorizeStubFailure{Code: "vector_execution_failed", Message: "describe failed", Retryable: true}
+	})
+	health, err = unreadable.store(t).Health(context.Background())
+	if err == nil {
+		t.Fatal("a failing health call must report its error")
+	}
+	if health.Status != "error" || health.ModelReady {
+		t.Errorf("health = %+v, want an error status with the model marked not ready", health)
+	}
+
+	degraded := newVectorizeFakeIndex(true)
+	degraded.geometryError = true
+	health, err = newVectorizeWorkerStub(t, degraded.responder()).store(t).Health(context.Background())
+	if err != nil {
+		t.Fatalf("a geometry-less health report must still render: %v", err)
+	}
+	joined := strings.Join(health.PreflightIssues, " | ")
+	if !strings.Contains(joined, "describe") {
+		t.Errorf("preflight issues = %v, want the unusable index geometry reported by its cause", health.PreflightIssues)
+	}
+	if !strings.Contains(joined, "cold process") {
+		t.Errorf("preflight issues = %v, want the specific consequence stated, not just the cause", health.PreflightIssues)
 	}
 
 	unbound := newVectorizeWorkerStub(t, newVectorizeFakeIndex(false).responder())
@@ -918,17 +1032,6 @@ func TestVectorizeHealthReportsOnlyWhatTheTransportCanObserve(t *testing.T) {
 	}
 	if len(health.PreflightIssues) == 0 {
 		t.Error("an unhealthy report must say why")
-	}
-
-	failing := newVectorizeWorkerStub(t, func(vectorizeStubCall) (string, *vectorizeStubFailure) {
-		return "", &vectorizeStubFailure{Code: "vector_execution_failed", Message: "binding query failed", Retryable: true}
-	})
-	health, err = failing.store(t).Health(context.Background())
-	if err == nil {
-		t.Fatal("a failing health call must report its error")
-	}
-	if health.Status != "error" || health.ModelReady {
-		t.Errorf("health = %+v, want an error status with the model marked not ready", health)
 	}
 }
 
@@ -945,10 +1048,16 @@ func TestVectorizeCountEnumeratesTheSessionAndRefusesAWholeIndexCount(t *testing
 	if count != 4 {
 		t.Errorf("Count = %d, want 4", count)
 	}
-	if _, err := store.Count(ctx, "  "); err == nil {
-		t.Error("a whole-index count must fail: this contract has no collection count")
-	} else if !strings.Contains(err.Error(), "collection count") {
-		t.Errorf("err = %v, want it to name the missing collection count", err)
+	if _, err := store.Count(ctx, "  "); err != nil {
+		t.Fatalf("a whole-index count is now observable and must answer: %v", err)
+	} else if count, _ := store.Count(ctx, "  "); count != index.size() {
+		t.Errorf("whole-index count = %d, want the index-wide %d", count, index.size())
+	}
+	// The two counts are different questions and must not be confused. The
+	// index-wide figure spans every session INCLUDING the reference library, so
+	// it is a drift signal against canonical truth, never a session count.
+	if total, _ := store.Count(ctx, "  "); total == 4 {
+		t.Errorf("whole-index count = %d, want it to differ from the 4 documents in sess-1 alone", total)
 	}
 }
 
@@ -990,11 +1099,21 @@ func TestVectorizeCountIsExactAtTheEnumerationCap(t *testing.T) {
 	}
 }
 
+// TestVectorizeGetDocumentsReadsExactlyTheRequestedIDsWithTheirVectors pins the
+// exact keyed read.
+//
+// The previous version of this test pinned ONE QUERY PER ID, which was a
+// workaround for a contract that had no keyed read. It is now a single vector.get
+// that asks for all the ids at once, and the assertion has to be inverted: a
+// per-id query is an approximate similarity walk, so it could report a document
+// the index holds as absent, which for the outbox readback means a duplicate
+// write and for startup recovery means re-upserting documents that already
+// exist.
 func TestVectorizeGetDocumentsReadsExactlyTheRequestedIDsWithTheirVectors(t *testing.T) {
 	store, index, stub := newVectorizeIndexedStore(t)
 	vectorizeSeedSession(t, index, "sess-1")
-	primeVectorizeProbe(t, store, []float32{1, 0})
 	readsBefore := len(stub.callsFor(cloudflarebridge.OpVectorQuery))
+	getsBefore := len(stub.callsFor(cloudflarebridge.OpVectorGet))
 	docs, err := any(store).(ExactDocumentReader).GetDocuments(context.Background(), []string{
 		"memory:sess-1:3", "memory:sess-1:1", "memory:sess-1:3", "  ", "memory:sess-1:absent",
 	})
@@ -1024,18 +1143,12 @@ func TestVectorizeGetDocumentsReadsExactlyTheRequestedIDsWithTheirVectors(t *tes
 	if docs[0].SimilarityAvailable || docs[0].Distance != 0 {
 		t.Error("a read must not report a similarity: the ranking that produced it is a dimension probe")
 	}
-	reads := stub.callsFor(cloudflarebridge.OpVectorQuery)
-	if len(reads)-readsBefore != 3 {
-		t.Errorf("read round trips = %d, want one per requested id", len(reads)-readsBefore)
+	// One keyed read for every requested id, and no approximate query at all.
+	if got := len(stub.callsFor(cloudflarebridge.OpVectorGet)) - getsBefore; got != 1 {
+		t.Errorf("vector.get round trips = %d, want exactly 1 for the whole batch", got)
 	}
-	for _, call := range reads[readsBefore:] {
-		if !vectorizeStubBool(call.Payload["includeValues"]) {
-			t.Error("a read must request the stored values")
-		}
-		filter, _ := vectorizeStubFilter(call.Payload)
-		if len(filter) != 1 || filter[vectorizeDocumentIDKey] == nil {
-			t.Errorf("read filter = %#v, want the reserved document id equality", filter)
-		}
+	if got := len(stub.callsFor(cloudflarebridge.OpVectorQuery)) - readsBefore; got != 0 {
+		t.Errorf("approximate query round trips = %d, want 0: an exact read must not use a similarity walk", got)
 	}
 	empty, err := any(store).(ExactDocumentReader).GetDocuments(context.Background(), []string{" ", ""})
 	if err != nil {
@@ -1074,40 +1187,92 @@ func TestVectorizeListDocumentsEnumeratesTheSessionAndSortsByID(t *testing.T) {
 	}
 }
 
-func TestVectorizeEnumerationNeedsAnObservedIndexDimension(t *testing.T) {
+// TestVectorizeEnumerationWorksOnAColdProcess is the inversion of a former
+// limitation.
+//
+// The contract as first written reported no index dimension, and Vectorize
+// rejects a query whose vector length differs from the index, so a read-only
+// enumeration on a process that had neither written nor recalled anything could
+// not run at all. The previous version of this test PINNED THAT FAILURE, naming
+// it as the honest outcome rather than a defect.
+//
+// It was honest and it was still wrong. Cloudflare Containers scale to zero, so
+// a cold process is the common case, and DeleteSession in particular cannot prime
+// a dimension through itself. The binding's describe() reports the index width,
+// so the dimension is now asked for instead of inferred, and every enumeration
+// works cold.
+func TestVectorizeEnumerationWorksOnAColdProcess(t *testing.T) {
 	store, index, _ := newVectorizeIndexedStore(t)
 	vectorizeSeedSession(t, index, "sess-1")
 	ctx := context.Background()
-	// Vectorize rejects a query whose vector dimension differs from the index
-	// and this contract reports no dimension, so a read-only process that has
-	// neither written nor recalled anything cannot enumerate. It is told so
-	// rather than handed a fabricated result.
-	if _, err := any(store).(ExactDocumentReader).GetDocuments(ctx, []string{"memory:sess-1:1"}); err == nil {
-		t.Error("GetDocuments must report the unknown dimension instead of guessing one")
+
+	// Nothing has been written or recalled by this store. The documents were
+	// placed straight into the index, so the store has observed no embedding.
+	if store.probeVector() != nil {
+		t.Fatal("fixture is wrong: a cold store must have observed no embedding")
 	}
+	if store.dimension != 0 {
+		t.Fatal("fixture is wrong: a cold store must not know the dimension yet")
+	}
+
+	// An exact read no longer needs a probe vector at all: vector.get is keyed.
+	docs, err := any(store).(ExactDocumentReader).GetDocuments(ctx, []string{"memory:sess-1:1"})
+	if err != nil {
+		t.Fatalf("a cold exact read must work: %v", err)
+	}
+	if len(docs) != 1 || docs[0].ID != "memory:sess-1:1" {
+		t.Fatalf("cold GetDocuments = %v, want the one document", vectorizeDocumentIDs(docs))
+	}
+	if len(docs[0].Embedding) != 2 {
+		t.Errorf("stored values = %v, want the embedding startup recovery probes with", docs[0].Embedding)
+	}
+
+	// A filtered enumeration still needs a query vector, and the dimension now
+	// comes from the index rather than from this process's own history.
+	listed, err := any(store).(DocumentLister).ListDocuments(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("a cold enumeration must work: %v", err)
+	}
+	if len(listed) != 4 {
+		t.Errorf("cold ListDocuments = %d documents, want 4", len(listed))
+	}
+	if store.dimension != 2 {
+		t.Errorf("learned dimension = %d, want the index width 2", store.dimension)
+	}
+	if total, err := store.Count(ctx, "  "); err != nil || total != index.size() {
+		t.Errorf("cold whole-index count = %d (%v), want %d", total, err, index.size())
+	}
+	if err := store.DeleteSession(ctx, "sess-1"); err != nil {
+		t.Fatalf("a cold DeleteSession must work: %v", err)
+	}
+	if index.size() != 0 {
+		t.Errorf("index size = %d, want the session deleted", index.size())
+	}
+}
+
+// TestVectorizeEnumerationFailsLoudlyWithoutAKnownDimension keeps the honest
+// failure for the one case that is still genuinely unknowable: a Worker that
+// cannot describe its index and a process that has never written anything. It
+// must be a named error, never a fabricated or silently empty result.
+func TestVectorizeEnumerationFailsLoudlyWithoutAKnownDimension(t *testing.T) {
+	index := newVectorizeFakeIndex(true)
+	index.geometryError = true
+	store := newVectorizeWorkerStub(t, index.responder()).store(t)
+	ctx := context.Background()
+
 	if _, err := any(store).(DocumentLister).ListDocuments(ctx, "sess-1"); err == nil {
 		t.Error("ListDocuments must report the unknown dimension instead of guessing one")
+	} else if !strings.Contains(err.Error(), "dimension") {
+		t.Errorf("err = %v, want it to name the unknown dimension", err)
 	}
 	if err := store.DeleteSession(ctx, "sess-1"); err == nil {
 		t.Error("DeleteSession must report the unknown dimension instead of guessing one")
 	}
-	if _, err := store.Count(ctx, "sess-1"); err == nil {
-		t.Error("Count must report the unknown dimension instead of guessing one")
+	if _, err := store.Count(ctx, "  "); err == nil {
+		t.Error("a whole-index count must fail rather than report zero")
 	}
-	if index.size() != 4 {
-		t.Fatalf("index size = %d, want no enumeration to have deleted anything", index.size())
-	}
-	if err := store.Upsert(ctx, "sess-1", []VectorDocument{{
-		ID: "memory:sess-1:9", Embedding: []float32{0.5, 0.5}, ChatSessionID: "sess-1",
-	}}); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	docs, err := any(store).(DocumentLister).ListDocuments(ctx, "sess-1")
-	if err != nil {
-		t.Fatalf("ListDocuments after the dimension was observed: %v", err)
-	}
-	if len(docs) != 5 {
-		t.Errorf("ListDocuments = %d documents, want 5", len(docs))
+	if index.size() != 0 {
+		t.Errorf("index size = %d, want no enumeration to have deleted anything", index.size())
 	}
 }
 

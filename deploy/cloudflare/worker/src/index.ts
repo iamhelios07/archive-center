@@ -182,6 +182,8 @@ export interface VectorizePort {
   upsert(vectors: VectorizeVector[]): Promise<unknown>;
   deleteByIds(ids: string[]): Promise<unknown>;
   query(vector: number[], options?: VectorizeQueryOptions): Promise<VectorizeMatches>;
+  getByIds(ids: string[]): Promise<VectorizeVector[]>;
+  describe(): Promise<VectorizeIndexInfo>;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -427,16 +429,85 @@ export async function runVectorQuery(port: VectorizePort, payload: unknown): Pro
 }
 
 /**
- * vector.health reports the binding state only. An absent binding is reported
- * as bound=false rather than as an error so the health report renders as
- * unhealthy instead of failing to render. No index identity is reported: the
- * binding exposes no account-neutral version string of its own.
+ * vector.get reads exact documents by id.
+ *
+ * Vectorize's getByIds returns the raw unscored vectors, which is what the Go
+ * side needs and what a filtered query cannot give it. A filtered query is
+ * APPROXIMATE: the index may drop a matching candidate from an ANN walk, so
+ * using one to answer "does this document exist" would let an exact read report
+ * a document as absent while the index holds it. The outbox verifies a mutation
+ * by reading the document back, and startup recovery reconciles a snapshot
+ * against the index, so a false "absent" in either is a duplicate write or a
+ * needless re-upsert. Ids that do not exist are simply absent from the result
+ * rather than an error, so a caller can retry the whole batch.
  */
-export function runVectorHealth(port: VectorizePort | undefined): unknown {
+export async function runVectorGet(port: VectorizePort, payload: unknown): Promise<unknown> {
+  const request = (payload ?? {}) as { ids?: unknown };
+  if (!Array.isArray(request.ids)) {
+    throw new VectorRequestError("vector.get requires an ids array");
+  }
+  if (request.ids.some((id) => typeof id !== "string" || id.length === 0)) {
+    throw new VectorRequestError("vector.get accepts non-empty string ids only");
+  }
+  if (request.ids.length === 0) {
+    return { vectors: [] };
+  }
+  const found = await port.getByIds(request.ids as string[]);
+  return { vectors: (found ?? []).map(projectVector) };
+}
+
+/** One stored vector, in the shape the Go side decodes. */
+function projectVector(vector: VectorizeVector): Record<string, unknown> {
+  return {
+    id: vector.id,
+    values: (vector.values ?? []) as number[],
+    metadata: (vector.metadata ?? {}) as Record<string, unknown>,
+  };
+}
+
+/**
+ * vector.health reports the binding state and the index geometry.
+ *
+ * An absent binding is reported as bound=false rather than as an error so the
+ * health report renders as unhealthy instead of failing to render.
+ *
+ * The geometry is here because two of the Go provider's operations are otherwise
+ * impossible on a cold process, and neither can work around it:
+ *
+ *  - The index dimension is fixed at creation and Vectorize rejects a query
+ *    whose vector length differs from it. An exact or filtered READ therefore
+ *    needs a correctly sized vector, and the only vector the Go side can have on
+ *    a cold process is none. Without the dimension the first read of a freshly
+ *    started Container fails, and Cloudflare Containers scale to zero, so that
+ *    is the common case rather than an edge one.
+ *  - A count for the whole index cannot be derived from a filtered query, and
+ *    paging a filtered query to exhaustion to approximate one would be O(n) and
+ *    would still be an approximation.
+ *
+ * No index identity is reported. The binding exposes no account-neutral name or
+ * version of its own, and inventing one would mean inventing an index identity
+ * that does not exist.
+ */
+export async function runVectorHealth(port: VectorizePort | undefined): Promise<unknown> {
   if (port === undefined || port === null) {
     return { bound: false };
   }
-  return { bound: true, version: String(ENVELOPE_VERSION) };
+  // describe() is the only account-neutral index read the binding offers, and it
+  // is what makes a cold read possible at all. A failure here must not take the
+  // whole health report down: a bound-but-unreadable index is still worth
+  // reporting, just without geometry.
+  try {
+    const info = await port.describe();
+    return {
+      bound: true,
+      version: String(ENVELOPE_VERSION),
+      dimensions: info.dimensions,
+      vectorCount: info.vectorCount,
+      processedUpToMutation: info.processedUpToMutation,
+    };
+  } catch {
+    return { bound: true, version: String(ENVELOPE_VERSION), geometryError: true };
+  }
 }
 
 /**
@@ -517,6 +588,8 @@ async function dispatch(env: Env, request: BridgeRequest): Promise<{ status: num
       return dispatchVector(env, request, runVectorDelete);
     case "vector.query":
       return dispatchVector(env, request, runVectorQuery);
+    case "vector.get":
+      return dispatchVector(env, request, runVectorGet);
     case "vector.health":
       // The one Vectorize operation that must not fail: an absent binding is a
       // health report, not an error.
@@ -526,7 +599,7 @@ async function dispatch(env: Env, request: BridgeRequest): Promise<{ status: num
           version: ENVELOPE_VERSION,
           id: request.id,
           ok: true,
-          result: runVectorHealth(env.VECTORIZE),
+          result: await runVectorHealth(env.VECTORIZE),
         },
       };
     default:
@@ -535,7 +608,7 @@ async function dispatch(env: Env, request: BridgeRequest): Promise<{ status: num
         body: envelopeError(
           request.id,
           "not_implemented",
-          `operation ${JSON.stringify(request.operation)} is not implemented in this stage; canonical D1 query/batch and vector upsert/delete/query/health are available, and operator jobs land in Stage 5`,
+          `operation ${JSON.stringify(request.operation)} is not implemented in this stage; canonical D1 query/batch and vector upsert/delete/query/get/health are available, and operator jobs land in Stage 5`,
           false,
         ),
       };

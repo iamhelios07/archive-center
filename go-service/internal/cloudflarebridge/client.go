@@ -46,6 +46,7 @@ const (
 	OpVectorUpsert = "vector.upsert"
 	OpVectorDelete = "vector.delete"
 	OpVectorQuery  = "vector.query"
+	OpVectorGet    = "vector.get"
 	OpVectorHealth = "vector.health"
 	OpAdminJob     = "admin.job"
 )

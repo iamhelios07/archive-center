@@ -117,6 +117,15 @@ type vectorizeStore struct {
 	// enumeration queries; see queryProbe.
 	probeMu sync.RWMutex
 	probe   []float32
+
+	// geometryMu guards dimension, the index width reported by the Worker.
+	//
+	// It is kept apart from probe because the two are not equally trustworthy.
+	// probe is an embedding this process actually wrote or recalled, so it is
+	// evidence about the index; dimension is the index's own answer, and it is
+	// the only one available on a cold process.
+	geometryMu sync.RWMutex
+	dimension  int
 }
 
 // The runtime type-switches on the optional capabilities, so a missing method
@@ -180,8 +189,81 @@ type vectorizeQueryResult struct {
 }
 
 type vectorizeHealthResult struct {
-	Bound   bool   `json:"bound"`
-	Version string `json:"version,omitempty"`
+	Bound bool `json:"bound"`
+	// Dimensions is the fixed embedding width of the index. It is what makes a
+	// read-only enumeration possible on a cold process, and it is a property of
+	// the index rather than of this deployment, so reporting it discloses
+	// nothing account-specific.
+	Dimensions int `json:"dimensions,omitempty"`
+	// VectorCount is the index-wide document count. MariaDB remains canonical for
+	// per-session counts, but an index-wide figure is useful for spotting an index
+	// that has drifted from canonical truth.
+	VectorCount           int    `json:"vectorCount,omitempty"`
+	ProcessedUpToMutation uint64 `json:"processedUpToMutation,omitempty"`
+	// GeometryError is set when the binding is present but describe() failed. The
+	// health report stays useful: a bound-but-unreadable index is still worth
+	// reporting, just without geometry.
+	GeometryError bool `json:"geometryError,omitempty"`
+}
+
+type vectorizeGetPayload struct {
+	IDs []string `json:"ids"`
+}
+
+// vectorizeGetResult carries exact, unscored documents keyed by id.
+type vectorizeGetResult struct {
+	Vectors []vectorizeStoredVector `json:"vectors"`
+}
+
+// vectorizeStoredVector is one document read back by id.
+//
+// Values are decoded as []float64 because that is what JSON carries, and
+// narrowed to the float32 the index stores on the way into the VectorDocument.
+// A get response and a query response arrive over the same JSON encoding, so
+// they share the element type deliberately rather than by accident.
+type vectorizeStoredVector struct {
+	ID       string         `json:"id"`
+	Values   []float64      `json:"values"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+// indexGeometry asks the Worker for the index dimension, caching the answer.
+//
+// The cache is not an optimisation; it is what keeps a listing from costing a
+// health round trip per page. A failure is not cached, so a Worker that can
+// describe its index once can do so again after a transient fault.
+func (s *vectorizeStore) indexGeometry(ctx context.Context) (int, error) {
+	s.geometryMu.Lock()
+	cached := s.dimension
+	s.geometryMu.Unlock()
+	if cached > 0 {
+		return cached, nil
+	}
+	var result vectorizeHealthResult
+	if err := s.client.Do(ctx, cloudflarebridge.OpVectorHealth, nil, &result); err != nil {
+		return 0, err
+	}
+	if result.Dimensions <= 0 {
+		return 0, errors.New("vectorize store: the Worker did not report an index dimension")
+	}
+	s.rememberDimension(result.Dimensions)
+	return result.Dimensions, nil
+}
+
+// rememberDimension caches the index width. A width already learned is never
+// overwritten, because a second, different answer means the index was rebuilt
+// under this process and the cached probe vectors are now the wrong length. The
+// existing embedding probe is the thing that detects that case, on the next
+// query, where the error names the cause.
+func (s *vectorizeStore) rememberDimension(dimension int) {
+	if dimension <= 0 {
+		return
+	}
+	s.geometryMu.Lock()
+	if s.dimension == 0 {
+		s.dimension = dimension
+	}
+	s.geometryMu.Unlock()
 }
 
 // Search runs one recall query and returns the provider's matches, sorted with
@@ -403,12 +485,19 @@ func (s *vectorizeStore) DeleteDocuments(ctx context.Context, ids []string) erro
 // is what startup_vector_recovery.go reuses to run its probe query and to
 // reconcile the cached snapshot.
 //
-// This is not ChromaDB get-by-id. The frozen contract has no such operation, so
-// each id is pinned with a metadata equality filter on the reserved document id
-// field, which reduces the candidate set to that one document and makes the
-// answer independent of the approximate index. The cost is one bridge round trip
-// per requested id, issued with bounded concurrency. Ids that are not present
-// are simply absent from the result, as they are for Chroma.
+// This is the EXACT read ChromaDB performs, and it is exact in the sense that
+// matters: vector.get maps to the binding's getByIds, which is a keyed lookup,
+// not a similarity walk. The previous implementation pinned each id with a
+// metadata equality filter over a filtered query, which is approximate — an ANN
+// index may drop a matching candidate from the walk — and cost one bridge round
+// trip per id. A false "absent" there is not cosmetic: the outbox verifies a
+// mutation by reading the document back, so a false absent becomes a duplicate
+// write, and startup recovery would re-upsert documents the index already holds.
+//
+// Ids that are not present are simply absent from the result, exactly as they
+// are for Chroma, so a caller can retry the whole batch. Requested order is
+// preserved among the ids that were found, and a request naming an id twice
+// returns that document once.
 func (s *vectorizeStore) GetDocuments(ctx context.Context, ids []string) ([]VectorDocument, error) {
 	clean := make([]string, 0, len(ids))
 	seen := map[string]bool{}
@@ -421,50 +510,22 @@ func (s *vectorizeStore) GetDocuments(ctx context.Context, ids []string) ([]Vect
 	if len(clean) == 0 {
 		return []VectorDocument{}, nil
 	}
-	probe, err := s.queryProbe()
-	if err != nil {
+	var result vectorizeGetResult
+	if err := s.client.Do(ctx, cloudflarebridge.OpVectorGet, vectorizeGetPayload{IDs: clean}, &result); err != nil {
 		return nil, err
 	}
-	docs := make([]VectorDocument, len(clean))
-	found := make([]bool, len(clean))
-	failures := make([]error, len(clean))
-	var wg sync.WaitGroup
-	slots := make(chan struct{}, vectorizeReadConcurrency)
-	for i := range clean {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			slots <- struct{}{}
-			defer func() { <-slots }()
-			matches, err := s.queryMatches(ctx, vectorizeQueryPayload{
-				Vector:        probe,
-				TopK:          1,
-				Filter:        map[string]any{vectorizeDocumentIDKey: clean[i]},
-				IncludeValues: true,
-			})
-			if err != nil {
-				failures[i] = err
-				return
-			}
-			for _, match := range matches {
-				if strings.TrimSpace(match.ID) == clean[i] {
-					docs[i] = s.documentFromMatch(match)
-					found[i] = true
-					return
-				}
-			}
-		}(i)
-	}
-	wg.Wait()
-	for _, err := range failures {
-		if err != nil {
-			return nil, err
+	byID := make(map[string]VectorDocument, len(result.Vectors))
+	for _, stored := range result.Vectors {
+		id := strings.TrimSpace(stored.ID)
+		if id == "" {
+			continue
 		}
+		byID[id] = s.documentFromStored(stored)
 	}
 	out := make([]VectorDocument, 0, len(clean))
-	for i := range clean {
-		if found[i] {
-			out = append(out, docs[i])
+	for _, id := range clean {
+		if doc, ok := byID[id]; ok {
+			out = append(out, doc)
 		}
 	}
 	return out, nil
@@ -480,7 +541,7 @@ func (s *vectorizeStore) GetDocuments(ctx context.Context, ids []string) ([]Vect
 // similarity is reported: the ranking that produced this order came from the
 // dimension probe vector and carries no meaning.
 func (s *vectorizeStore) ListDocuments(ctx context.Context, sessionID string) ([]VectorDocument, error) {
-	probe, err := s.queryProbe()
+	probe, err := s.queryProbe(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -558,17 +619,27 @@ func (s *vectorizeStore) Health(ctx context.Context) (HealthSnapshot, error) {
 			PreflightIssues: []string{"the Worker reports no Vectorize binding; vector recall is unavailable"},
 		}, nil
 	}
-	issues := []string{"the total document count is not observable: this bridge contract has no collection count operation"}
-	if s.probeVector() == nil {
-		issues = append(issues, "the index embedding dimension has not been observed in this process yet; document enumeration is unavailable until the first upsert or recall")
+	issues := []string{}
+	if result.GeometryError {
+		// An operator needs to know WHICH capability is missing, because the
+		// consequence is specific: without the dimension, document enumeration on
+		// a cold process fails until this process writes or recalls something.
+		issues = append(issues, "the Worker could not describe the index; document enumeration on a cold process is unavailable")
 	}
-	// result.Version is the index version. It is decoded but not surfaced:
-	// HealthSnapshot has no field for it and nothing in the runtime consumes
-	// one, so an operator cannot see an index version change from /ready.
-	// Adding that field is a shared-contract change, not a provider-local one.
+	if result.Dimensions <= 0 && !result.GeometryError {
+		issues = append(issues, "the index embedding dimension is unreported; document enumeration on a cold process is unavailable")
+	}
+	if result.Dimensions > 0 {
+		s.rememberDimension(result.Dimensions)
+	}
+	// result.Version is the bridge envelope version, not an index version. The
+	// binding exposes no account-neutral index name or version, and HealthSnapshot
+	// has no field for one. Inventing an index identity an operator could not
+	// resolve would be worse than leaving it out.
 	return HealthSnapshot{
 		Status:          "ok",
 		Collection:      vectorizeCollectionLabel,
+		TotalCount:      result.VectorCount,
 		ModelReady:      true,
 		PreflightIssues: issues,
 	}, nil
@@ -576,15 +647,30 @@ func (s *vectorizeStore) Health(ctx context.Context) (HealthSnapshot, error) {
 
 // Count returns the number of vectors for one session.
 //
-// Vectorize has no cheap collection count, so a session count is an
-// enumeration: it is exact whenever the sweep completes (a short page proves
-// the filtered set is smaller than the requested topK) and it fails rather than
-// returning a partial number when the cap is reached. A whole-index count is
-// not offered at all, because an unbounded sweep of every session is not a
-// count; MariaDB remains the canonical authority for that.
+// A WHOLE-INDEX count is index-wide rather than per session, and the binding
+// reports it, so an empty session id now answers from the index instead of
+// refusing. That is still not a session count and the distinction matters: the
+// index-wide figure counts reference-library documents and every session's
+// memories, so it is only meaningful as a drift signal against canonical truth,
+// never as "how many documents does this session have".
+//
+// A per-session count remains an enumeration: it is exact whenever the sweep
+// completes (a short page proves the filtered set is smaller than the requested
+// topK) and it fails rather than returning a partial number when the cap is
+// reached.
 func (s *vectorizeStore) Count(ctx context.Context, sessionID string) (int, error) {
 	if strings.TrimSpace(sessionID) == "" {
-		return 0, errors.New("vectorize store: this bridge contract has no collection count; Count needs a session id and enumerates that session")
+		// One health call carries both the dimension and the count, so there is no
+		// reason to ask twice.
+		var result vectorizeHealthResult
+		if err := s.client.Do(ctx, cloudflarebridge.OpVectorHealth, nil, &result); err != nil {
+			return 0, err
+		}
+		if result.GeometryError || result.Dimensions <= 0 {
+			return 0, errors.New("vectorize store: the Worker could not describe the index, so its document count is unavailable; MariaDB remains the canonical authority for totals")
+		}
+		s.rememberDimension(result.Dimensions)
+		return result.VectorCount, nil
 	}
 	docs, err := s.ListDocuments(ctx, sessionID)
 	if err != nil {
@@ -621,12 +707,25 @@ func (s *vectorizeStore) queryMatches(ctx context.Context, payload vectorizeQuer
 // transport's representation of the document id and the document text rather
 // than document metadata.
 func (s *vectorizeStore) documentFromMatch(match vectorizeQueryMatch) VectorDocument {
-	meta := chromaScalarMetadata(match.Metadata)
+	return s.documentFromStored(vectorizeStoredVector{ID: match.ID, Values: match.Values, Metadata: match.Metadata})
+}
+
+// documentFromStored maps one document read back by id to a VectorDocument.
+//
+// It shares documentFromMatch's mapping on purpose. A document read through
+// vector.get and the same document read through a query must produce the same
+// VectorDocument, because the outbox compares a readback against the write it
+// just made, and a mapping that differed between the two paths would make every
+// readback look like a change. The reserved transport fields are removed from the
+// exposed metadata, because they are this transport's representation of the
+// document id and the document text rather than document metadata.
+func (s *vectorizeStore) documentFromStored(stored vectorizeStoredVector) VectorDocument {
+	meta := chromaScalarMetadata(stored.Metadata)
 	text := stringFromAny(meta[vectorizeDocumentTextKey])
 	delete(meta, vectorizeDocumentTextKey)
 	delete(meta, vectorizeDocumentIDKey)
-	doc := vectorDocumentFromChroma(match.ID, text, meta)
-	doc.Embedding = vectorizeValues(match.Values)
+	doc := vectorDocumentFromChroma(stored.ID, text, meta)
+	doc.Embedding = vectorizeValues(stored.Values)
 	return doc
 }
 
@@ -776,6 +875,10 @@ func collectVectorizeEquality(out map[string]any, where map[string]any) error {
 	return nil
 }
 
+// vectorizeValues narrows JSON-decoded float64 values to the float32 the index
+// stores. It is lossless in the sense that matters: a float32 widened to
+// float64 in JSON and narrowed back is bit-identical, so a document read back
+// is the same float32 the process wrote.
 func vectorizeValues(values []float64) []float32 {
 	if len(values) == 0 {
 		return nil
@@ -827,22 +930,34 @@ func (s *vectorizeStore) probeVector() []float32 {
 // queryProbe returns the vector that carries the index dimension into an
 // enumeration query.
 //
-// Vectorize rejects a query whose vector dimension differs from the index, and
-// this contract has no operation that reports the dimension, so an enumeration
-// has to send a real vector. Which vector is irrelevant: every enumeration
-// query also sends a filter, and a filter that pins a single document (or a
-// single session) fixes the answer without reference to the query vector. The
-// provider therefore reuses the most recent embedding it has seen, which is
-// always the correct dimension because it is the dimension this process writes.
+// Vectorize rejects a query whose vector dimension differs from the index, so an
+// enumeration has to send a correctly sized vector. WHICH vector is irrelevant:
+// every enumeration query also sends a filter, and a filter that pins a single
+// document (or a single session) fixes the answer without reference to the query
+// vector.
 //
-// The cost is a real limitation: a process that performs a read-only
-// enumeration before any upsert or recall in that process has no dimension to
-// send. It gets a named error rather than a fabricated result, and the next
-// upsert or recall primes the probe.
-func (s *vectorizeStore) queryProbe() ([]float32, error) {
-	probe := s.probeVector()
-	if len(probe) == 0 {
-		return nil, errors.New("vectorize store: the index embedding dimension has not been observed in this process yet; enumeration needs a query vector, so upsert or recall one document first")
+// The dimension comes from the index itself. vector.health reports it from the
+// binding's describe(), so a read-only enumeration works on a cold process with
+// no prior write and no prior recall. That case is the COMMON one rather than an
+// edge one: Cloudflare Containers scale to zero, so a freshly started Container
+// has observed nothing, and DeleteSession in particular cannot prime a probe
+// through itself.
+//
+// The observed embedding remains the fallback for a Worker that cannot describe
+// its index, because it is still the correct dimension whenever this process has
+// written anything. Only a cold process on a Worker without describe() fails, and
+// it fails with a named error rather than a fabricated result.
+func (s *vectorizeStore) queryProbe(ctx context.Context) ([]float32, error) {
+	if probe := s.probeVector(); len(probe) > 0 {
+		return probe, nil
 	}
-	return probe, nil
+	if dimension, err := s.indexGeometry(ctx); err == nil && dimension > 0 {
+		// A unit vector is the least arbitrary filler available: it is a real
+		// direction, so the index answers a well-defined query instead of
+		// dividing by a zero norm, and the filter is what decides the result.
+		probe := make([]float32, dimension)
+		probe[0] = 1
+		return probe, nil
+	}
+	return nil, errors.New("vectorize store: the index embedding dimension is unknown; the Worker could not describe the index and this process has not written or recalled a document, so enumeration has no query vector to send")
 }
