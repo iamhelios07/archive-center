@@ -208,7 +208,7 @@ func NewServer(cfg config.Config) *Server {
 	}
 	vs = vector.NewMutationFencedStore(vs)
 	referenceVS = vector.NewMutationFencedStore(referenceVS)
-	return &Server{
+	s := &Server{
 		Cfg:                      cfg,
 		Started:                  started,
 		BackendInstanceID:        newBackendInstanceID(started),
@@ -225,6 +225,11 @@ func NewServer(cfg config.Config) *Server {
 		SourceAcceptances:        newCompleteTurnSourceAcceptanceLedger(),
 		RollbackDecisions:        newRollbackDecisionLedger(),
 	}
+	// Wired after construction, and before any route can serve, so an inherited
+	// job is already marked interrupted on the first request rather than there
+	// being a window where the list is briefly empty.
+	s.attachAdminJobPersistence()
+	return s
 }
 
 func newBackendInstanceID(started time.Time) string {

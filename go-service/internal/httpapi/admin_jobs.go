@@ -19,20 +19,21 @@ import (
 type adminJobProgressFunc func(map[string]any)
 
 type adminBackgroundJob struct {
-	ID         string
-	Kind       string
-	SessionID  string
-	Status     string
-	Request    map[string]any
-	Progress   map[string]any
-	Result     map[string]any
-	Error      string
-	StartedAt  time.Time
-	UpdatedAt  time.Time
-	FinishedAt *time.Time
-	Revision   uint64
-	changed    chan struct{}
-	cancel     context.CancelFunc
+	ID              string
+	Kind            string
+	SessionID       string
+	Status          string
+	Request         map[string]any
+	Progress        map[string]any
+	Result          map[string]any
+	Error           string
+	StartedAt       time.Time
+	UpdatedAt       time.Time
+	FinishedAt      *time.Time
+	Revision        uint64
+	changed         chan struct{}
+	lastPersistedAt time.Time
+	cancel          context.CancelFunc
 }
 
 type adminJobManager struct {
@@ -41,6 +42,108 @@ type adminJobManager struct {
 	jobs    map[string]*adminBackgroundJob
 	order   []string
 	maxJobs int
+
+	// persist writes a job's current state somewhere that outlives this process.
+	// It is nil on a deployment with no durable store, which is the local
+	// runtime and is correct there: the process that owns the jobs is the process
+	// that has them.
+	//
+	// It is never called while the manager lock is held, and never concurrently
+	// with itself: see persistCh.
+	persist func(job map[string]any)
+
+	// persistCh serialises writes to persist.
+	//
+	// Dispatching each write as its own goroutine loses the ORDER of the states,
+	// and the order is the whole point. A terminal write that a start write
+	// overtakes leaves a completed job recorded as still running, which is the
+	// exact confusion the durable record exists to remove. That bug was real: it
+	// passed in isolation and failed only under the load of the full suite, which
+	// is the worst way for a data-loss bug to present itself.
+	//
+	// One goroutine draining one channel keeps the order the manager produced and
+	// keeps the manager lock free of I/O.
+	persistCh chan map[string]any
+	persistWG sync.WaitGroup
+}
+
+// startPersistWriter begins draining persistCh.
+//
+// It is started on the first enqueue, so a manager on the local runtime never
+// runs a goroutine that has nothing to do.
+func (m *adminJobManager) startPersistWriter() {
+	if m.persist == nil || m.persistCh != nil {
+		return
+	}
+	m.persistCh = make(chan map[string]any, 64)
+	m.persistWG.Add(1)
+	go func() {
+		defer m.persistWG.Done()
+		for job := range m.persistCh {
+			m.persist(job)
+		}
+	}()
+}
+
+// enqueuePersist hands a snapshot to the writer.
+//
+// A full queue drops an IN-FLIGHT snapshot, because the next one supersedes it
+// within seconds and this is a recent history rather than a log. A terminal
+// snapshot is never dropped: it is the state the record exists for, and blocking
+// here rather than losing it is correct, since the manager lock is not held.
+func (m *adminJobManager) enqueuePersist(job map[string]any, terminal bool) {
+	if m == nil || m.persist == nil {
+		return
+	}
+	m.startPersistWriter()
+	if terminal {
+		m.persistCh <- job
+		return
+	}
+	select {
+	case m.persistCh <- job:
+	default:
+	}
+}
+
+// closePersistWriter stops the writer once the queued writes have been applied.
+func (m *adminJobManager) closePersistWriter() {
+	if m == nil || m.persistCh == nil {
+		return
+	}
+	close(m.persistCh)
+	m.persistWG.Wait()
+	m.persistCh = nil
+}
+
+// adminJobPersistInterval throttles writes of an in-flight job.
+//
+// A reindex reports progress per turn, and persisting each one would turn a
+// single operator action into thousands of writes against the canonical database
+// — to save a status line that changes every few seconds anyway. Terminal states
+// are always written, because those are the ones the record exists for.
+const adminJobPersistInterval = 5 * time.Second
+
+// persistJobLocked queues a snapshot if it is worth writing.
+//
+// Terminal transitions always persist: a completed, failed, cancelled or
+// deferred job is the thing an operator comes back for, and it will never be
+// written again. In-flight jobs are throttled, and a job that has never been
+// written yet is always written once, so a job that is later lost still leaves a
+// record of having existed.
+func (m *adminJobManager) persistJobLocked(job *adminBackgroundJob) {
+	if m == nil || m.persist == nil || job == nil {
+		return
+	}
+	terminal := adminJobTerminal(job.Status)
+	if !terminal && time.Since(job.lastPersistedAt) < adminJobPersistInterval {
+		return
+	}
+	snapshot := job.snapshot()
+	// The timestamp is taken when the snapshot is queued, so a slow backend does
+	// not cause every subsequent update to queue as well.
+	job.lastPersistedAt = time.Now()
+	m.enqueuePersist(snapshot, terminal)
 }
 
 func newAdminJobManager() *adminJobManager {
@@ -103,6 +206,11 @@ func (m *adminJobManager) start(kind, sid string, request map[string]any, work f
 	m.jobs[id] = job
 	m.order = append(m.order, id)
 	m.pruneLocked()
+	// Written immediately, and unconditionally, because a job that is lost
+	// entirely leaves nothing behind. If the instance is replaced before this job
+	// reaches a terminal state, the operator needs to know it existed and what
+	// kind it was, even if the throttled in-flight writes never happened.
+	m.persistJobLocked(job)
 	snapshot := job.snapshot()
 	m.mu.Unlock()
 
@@ -210,6 +318,7 @@ func (m *adminJobManager) update(id, status string, progress map[string]any) {
 	}
 	job.UpdatedAt = time.Now().UTC()
 	job.publishChangeLocked()
+	m.persistJobLocked(job)
 }
 
 func (m *adminJobManager) finish(id, status string, result map[string]any, errText string) {
@@ -248,6 +357,7 @@ func (m *adminJobManager) finish(id, status string, result map[string]any, errTe
 		job.Progress["progress_percent"] = 99
 	}
 	job.publishChangeLocked()
+	m.persistJobLocked(job)
 }
 
 func (m *adminJobManager) cancelJob(id string) (map[string]any, bool) {
@@ -280,6 +390,7 @@ func (m *adminJobManager) cancelJob(id string) (map[string]any, bool) {
 	job.Progress["error"] = job.Error
 	job.Progress["finished_at"] = now.Format(time.RFC3339)
 	job.publishChangeLocked()
+	m.persistJobLocked(job)
 	snapshot := job.snapshot()
 	m.mu.Unlock()
 	if cancel != nil {
@@ -495,6 +606,18 @@ func (s *Server) handleAdminJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs = append(jobs, durable...)
 
+	// Job snapshots are merged in for the same reason, and are marked so a
+	// restored job is distinguishable from a live one. A job the previous
+	// instance left open is presented as interrupted, never as running: nothing
+	// is executing it, and a progress bar that has stopped moving is the worst
+	// thing to show an operator who cannot tell why.
+	persisted, err := s.durableAdminJobSnapshots(r, limit)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "admin_jobs_unavailable", err.Error())
+		return
+	}
+	jobs = append(jobs, persisted...)
+
 	sort.SliceStable(jobs, func(i, j int) bool {
 		return strings.Compare(fmt.Sprint(jobs[i]["started_at"]), fmt.Sprint(jobs[j]["started_at"])) > 0
 	})
@@ -507,8 +630,52 @@ func (s *Server) handleAdminJobs(w http.ResponseWriter, r *http.Request) {
 		// Stated once, rather than left for the reader to infer from the flags:
 		// on a stateless Container the in-process half of this list is empty after
 		// a restart, and that is the design, not a fault.
-		"durable_source": s.resetRunsAreDurable(),
+		"durable_source":        s.resetRunsAreDurable(),
+		"job_snapshots_durable": s.adminJobSnapshotsAreDurable(),
 	})
+}
+
+// durableAdminJobSnapshots reads persisted job records, newest first.
+//
+// A snapshot is only presented when this process is not already presenting the
+// same job from memory, so a job that is running here appears once rather than
+// twice with two different statuses.
+func (s *Server) durableAdminJobSnapshots(r *http.Request, limit int) ([]map[string]any, error) {
+	snaps, ok := s.Store.(store.AdminJobSnapshotStore)
+	if !ok {
+		return nil, nil
+	}
+	snapshots, err := snaps.ListAdminJobSnapshots(r.Context(), limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		var job map[string]any
+		if len(snapshot.SnapshotJSON) == 0 || json.Unmarshal(snapshot.SnapshotJSON, &job) != nil {
+			// A snapshot that does not parse is still a record that something
+			// happened, and the columns carry its identity. Omitting it would make
+			// the job look like it never existed.
+			job = map[string]any{
+				"job_id": snapshot.JobID,
+				"kind":   snapshot.Kind,
+				"status": snapshot.Status,
+				"error":  "the stored snapshot could not be decoded; the job record itself is intact",
+			}
+		}
+		if _, live := s.AdminJobs.get(snapshot.JobID); live {
+			continue
+		}
+		job["durable"] = true
+		job["source"] = "d1_admin_jobs"
+		out = append(out, job)
+	}
+	return out, nil
+}
+
+func (s *Server) adminJobSnapshotsAreDurable() bool {
+	_, ok := s.Store.(store.AdminJobSnapshotStore)
+	return ok
 }
 
 // resetRunsAreDurable reports whether the reset control plane survives a restart,
