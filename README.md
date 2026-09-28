@@ -36,6 +36,17 @@ Go 포트를 바꾸면 RisuAI에 저장한 백엔드 URL의 포트도 변경해�
 
 JavaScript는 두 번째 backend가 아니며, 기억 정책과 저장 판단은 Go가 소유합니다.
 
+### Cloudflare 배포 옵션 (선택)
+
+MariaDB와 ChromaDB로 구성된 로컬 런타임이 기본이며 위 설명이 그 구성입니다.
+같은产品在 Cloudflare에서도 돌아갈 수 있습니다. 이 경우 canonical 저장소는
+D1(SQLite), 벡터 엔진은 Vectorize이고, Container의 Go backend가 Worker를
+브리지로 거쳐 둘에 접근합니다. Container는 stateless이며 재시작되지 않고
+교체되므로, 재시작을 견뎌야 하는 상태는 전부 D1에 있습니다.
+
+- 배포 절차, 복구·migration runbook, 무엇이 영속되고 무엇이 아닌지,
+  원격 테스트 경계: [`deploy/cloudflare/README.md`](deploy/cloudflare/README.md)
+
 ## License
 
 Except where a file or third-party notice states otherwise, Archive Center
