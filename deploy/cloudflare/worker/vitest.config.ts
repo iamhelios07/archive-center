@@ -22,43 +22,25 @@ export default defineConfig({
         // makes the envelope path testable end to end.
         bindings: { BRIDGE_TOKEN: "local-test-bridge-token" },
 
-        // NEITHER D1 nor Vectorize is declared, and both omissions are measured
-        // rather than assumed.
-        //
-        // VECTORIZE has no local simulator at all. The runtime classifies it as a
-        // REMOTE-ONLY binding (miniflare: vectorize: "remote"), and touching the
-        // local binding throws "Binding VECTORIZE needs to be run remotely". So
-        // the behaviour that actually matters — what error Vectorize raises, and
-        // therefore how the outbox classifies a mutation as retryable or terminal
-        // — is owned by the remote harness and cannot be reached from here. A
-        // local proxy would only throw on first use and teach us nothing.
-        //
-        // D1 does have a local simulator, but it is a DISK-BACKED DURABLE OBJECT:
-        // workerd creates one directory per such class at startup. On this host
-        // that call fails with ERROR_ACCESS_DENIED (Windows error #5) for the
-        // directory it names "miniflare-D1DatabaseObject", and the runtime exits
-        // before a single test runs. Declaring the binding therefore costs the
-        // whole suite its coverage instead of gaining D1 coverage.
-        //
-        // What was ruled out, so the search is not repeated:
-        //   - workerd itself works here. With no disk-backed binding the pool
-        //     starts and the Worker serves, so the runtime binary is fine.
-        //   - It is not the configuration form: the documented ephemeral array
-        //     form and a record form both reproduce it.
-        //   - It is not a filesystem policy or a blocked name: the identical
-        //     directory name is created without error in the project directory
-        //     and in %TEMP%, as is an arbitrary one.
-        //   - It is not the working directory: workerd is spawned with no cwd and
-        //     inherits, and pre-creating the directory where the project would
-        //     place it changes nothing.
-        //   - It is not this cacheDir: an absolute, pre-created one behaves the
-        //     same.
-        // The D1 assertions are kept in the test file and skipped, carrying the
-        // same note. A deleted test is indistinguishable from one that was never
-        // needed.
-        //
-        // The runtime's default cache directory is not writable here either, and
-        // this Worker uses neither the Cache API nor KV, so turning their on-disk
+        // D1 has a real local simulator, so the canonical query and batch
+        // handlers are exercised against the engine they meet in workerd. It is
+        // a DISK-BACKED DURABLE OBJECT, which is why `npm test` runs through
+        // scripts/run-worker-tests.mjs: that script hands the runtime a
+        // Low-integrity scratch directory, without which Windows Mandatory
+        // Integrity Control denies the write and the binding cannot start.
+        d1Databases: ["DB"],
+
+        // Vectorize is genuinely remote-only. The runtime classifies it as
+        // remote ("vectorize: \"remote\"") and touching the local binding throws
+        // "Binding VECTORIZE needs to be run remotely". There is no local
+        // simulator, and no label, path or flag that would create one. So the
+        // behaviour that actually matters — what error Vectorize raises, and
+        // therefore how the outbox classifies a mutation as retryable or
+        // terminal — is owned by the remote harness. A local proxy would only
+        // throw on first use and teach us nothing.
+
+        // The runtime's default cache directory is not writable here, and this
+        // Worker uses neither the Cache API nor KV, so turning their on-disk
         // persistence off removes that failure without changing anything the
         // tests exercise.
         cache: false,

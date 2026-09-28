@@ -15,3 +15,7 @@ dist/
 # Logs and scratch state.
 *.log
 *.tmp
+
+# Low-integrity scratch directory for the Worker test runtime.
+# Created by scripts/run-worker-tests.mjs and never meaningful to commit.
+.workerd-temp/

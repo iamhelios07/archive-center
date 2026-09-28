@@ -91,12 +91,12 @@ describe("bridge envelope contract", () => {
     expect(ping.body.result.pong).toBe(true);
 
     const health = await envelope("bridge.health");
-    // Neither binding is declared in the test config, and the report must say so
-    // for both. Reporting "bound" for an accelerator this process cannot reach is
-    // the same lie Stage 4 removed from the Go runtime, pointed the other way:
-    // there, a Chroma-only check reported the accelerator as unavailable on a
-    // deployment that had one.
-    expect(health.body.result.d1).toBe("missing");
+    // D1 is declared, so it is bound. Vectorize is not declarable locally, and
+    // the report must not claim otherwise: reporting "bound" for an accelerator
+    // this process cannot reach is the same lie Stage 4 removed from the Go
+    // runtime, pointed the other way — there, a Chroma-only check reported the
+    // accelerator as unavailable on a deployment that had one.
+    expect(health.body.result.d1).toBe("bound");
     expect(health.body.result.vectorize).toBe("missing");
   });
 
@@ -190,24 +190,18 @@ describe("vector request validation, decided without a binding", () => {
 });
 
 /**
- * D1 has a real local simulator, implemented as a DISK-BACKED DURABLE OBJECT.
- * workerd creates one directory per such class at startup, and on this host that
- * call is denied (Windows error #5, for "miniflare-D1DatabaseObject"), so the
- * runtime exits before a test runs. Declaring the binding in the config would
- * therefore cost the whole suite its coverage rather than gain D1 coverage.
+ * Canonical D1 operations against the real local simulator.
  *
- * These assertions are kept and skipped rather than deleted. They are the right
- * assertions — the batch rollback one pins a guarantee the canonical write
- * depends on — and a deleted test is indistinguishable from a test that was
- * never needed. A skipped one states the gap where a reader will find it. See
- * vitest.config.ts for what was ruled out, so the search is not repeated.
+ * These ran for a while as a skipped block, on the belief that D1 could not start
+ * on this host. It can, and the belief was wrong in a way worth recording: the
+ * repository carries a Low mandatory integrity label, so workerd.exe runs at Low
+ * integrity, while the default %TEMP% is Medium, and Windows Mandatory Integrity
+ * Control forbids a Low process from writing into a Medium directory. Every
+ * disk-backed binding therefore died at startup with an access error that read
+ * exactly like a runtime bug. scripts/run-worker-tests.mjs hands the runtime a
+ * Low-labelled scratch directory, and the block runs.
  */
-const d1StorageAvailable =
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
-    "AC_WORKER_D1_TESTS"
-  ] === "1";
-
-describe.runIf(d1StorageAvailable)("canonical D1 operations against the local simulator", () => {
+describe("canonical D1 operations against the local simulator", () => {
   it("runs a parameterised query and reports columns and rows", async () => {
     const response = await envelope("d1.query", { sql: "SELECT 1 AS n, 'x' AS s" });
     expect(response.body.ok).toBe(true);
