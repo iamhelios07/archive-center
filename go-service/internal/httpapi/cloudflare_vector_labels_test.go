@@ -103,6 +103,11 @@ func TestReadyNamesChromaOnALocalDeployment(t *testing.T) {
 	if got := checks["vector_accelerator_reachable"]; got != "chromadb" {
 		t.Errorf("vector_accelerator_reachable = %v, want %q", got, "chromadb")
 	}
+	// A Noop store cannot persist settings, so the report must say the settings
+	// are filesystem backed rather than implying they are safe anywhere else.
+	if got := checks["turn_preparation_settings"]; got != "filesystem" {
+		t.Errorf("turn_preparation_settings = %v, want %q for a store without the capability", got, "filesystem")
+	}
 }
 
 // TestReadySeparatesTheEngineFromItsReachability is the distinction the two keys

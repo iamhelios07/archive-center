@@ -157,6 +157,17 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// deployment is built around ChromaDB" and "ChromaDB is reachable right now".
 	checks["vector_accelerator_reachable"] = s.Cfg.VectorAcceleratorName()
 
+	// Whether this deployment persists turn preparation settings durably. The local
+	// runtime writes them beside its data directory and a Cloudflare Container
+	// keeps them in D1, so the answer differs by deployment. An operator needs it
+	// stated rather than inferred: a setting that lives in a container layer is
+	// gone after an idle period, with no error anywhere to explain it.
+	if s.turnPreparationSettingsAvailable() {
+		checks["turn_preparation_settings"] = "durable"
+	} else {
+		checks["turn_preparation_settings"] = "filesystem"
+	}
+
 	if s.StoreOpenError != nil {
 		checks["store_open_error"] = s.StoreOpenError.Error()
 	} else {

@@ -105,6 +105,7 @@ var d1CapabilityProbes = []capabilityProbe{
 	{name: "SupersessionResolutionStore", probe: func(s Store) bool { _, ok := s.(SupersessionResolutionStore); return ok }},
 	{name: "ThemeOffscreenCarryStore", probe: func(s Store) bool { _, ok := s.(ThemeOffscreenCarryStore); return ok }},
 	{name: "TimelineTurnIndexStore", probe: func(s Store) bool { _, ok := s.(TimelineTurnIndexStore); return ok }},
+	{name: "TurnPreparationSettingsStore", probe: func(s Store) bool { _, ok := s.(TurnPreparationSettingsStore); return ok }},
 	{name: "UniqueActiveEntitySurfaceIdentityResolver", probe: func(s Store) bool { _, ok := s.(UniqueActiveEntitySurfaceIdentityResolver); return ok }},
 	{name: "UniqueActiveEntitySurfaceResolver", probe: func(s Store) bool { _, ok := s.(UniqueActiveEntitySurfaceResolver); return ok }},
 	{name: "VectorRecoveryCacheReader", probe: func(s Store) bool { _, ok := s.(VectorRecoveryCacheReader); return ok }},
