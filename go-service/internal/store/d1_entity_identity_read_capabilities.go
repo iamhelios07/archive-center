@@ -52,6 +52,7 @@ import (
 var _ EntityIdentityCatalogReader = (*d1Store)(nil)
 var _ ReviewedEntityIdentityResolver = (*d1Store)(nil)
 var _ UniqueActiveEntitySurfaceIdentityResolver = (*d1Store)(nil)
+var _ UniqueActiveEntitySurfaceResolver = (*d1Store)(nil)
 
 // d1ActiveEntityIdentityColumns is the shared projection for identity reads.
 // COALESCE reproduces MariaDB's nullable-column reads: a NULL source turn id,
@@ -233,6 +234,17 @@ func (s *d1Store) ListReviewedEntityIdentityLinks(ctx context.Context, chatSessi
 // one hop was taken, or ErrNotFound when the source is already the root. Two
 // distinct reviewed targets from one hop are a contradiction the caller must
 // resolve, so they fail closed with ErrReviewedEntityIdentityAmbiguous.
+// ResolveUniqueActiveEntityIDBySurface preserves the older ID-only resolver
+// contract for character-perspective callers. The resolved identity method is
+// canonical; keeping this as a projection prevents the two predicates drifting.
+func (s *d1Store) ResolveUniqueActiveEntityIDBySurface(ctx context.Context, chatSessionID, normalizedSurface string) (string, error) {
+	identity, err := s.ResolveUniqueActiveEntityIdentityBySurface(ctx, chatSessionID, normalizedSurface)
+	if err != nil {
+		return "", err
+	}
+	return identity.StableEntityID, nil
+}
+
 func (s *d1Store) ResolveReviewedCanonicalEntityID(ctx context.Context, chatSessionID, sourceEntityID string) (string, error) {
 	chatSessionID = strings.TrimSpace(chatSessionID)
 	sourceEntityID = strings.TrimSpace(sourceEntityID)
