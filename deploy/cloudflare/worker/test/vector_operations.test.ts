@@ -190,18 +190,17 @@ describe("vector request validation, decided without a binding", () => {
 });
 
 /**
- * D1 has a real local simulator, but the runtime cannot always create the
- * directory that backs it: workerd aborts at STARTUP with a CreateDirectory
- * access error naming "miniflare-D1DatabaseObject", before a single test runs.
- * Declaring the binding is therefore enough to break the whole suite here, which
- * is why the config leaves it out and this block is skipped rather than deleted.
+ * D1 has a real local simulator, implemented as a DISK-BACKED DURABLE OBJECT.
+ * workerd creates one directory per such class at startup, and on this host that
+ * call is denied (Windows error #5, for "miniflare-D1DatabaseObject"), so the
+ * runtime exits before a test runs. Declaring the binding in the config would
+ * therefore cost the whole suite its coverage rather than gain D1 coverage.
  *
- * These are the right assertions — the batch rollback one in particular pins a
- * guarantee the canonical write depends on — and they are expected to run
- * wherever the runtime can create its storage. A deleted test is
- * indistinguishable from a test that was never needed; a skipped one states the
- * gap where a reader will find it. Set AC_WORKER_D1_TESTS=1 AND declare
- * d1Databases in the config to run them.
+ * These assertions are kept and skipped rather than deleted. They are the right
+ * assertions — the batch rollback one pins a guarantee the canonical write
+ * depends on — and a deleted test is indistinguishable from a test that was
+ * never needed. A skipped one states the gap where a reader will find it. See
+ * vitest.config.ts for what was ruled out, so the search is not repeated.
  */
 const d1StorageAvailable =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
