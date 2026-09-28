@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // d1Store is the Cloudflare D1 canonical provider.
@@ -29,6 +30,11 @@ import (
 // d1Store implements Store over a D1 transport.
 type d1Store struct {
 	conn D1Conn
+
+	// Serializes source-revision invalidation with its known-vector discovery.
+	// D1 Batch owns the commit boundary; this protects the necessary read-before-
+	// batch preparation while one Go service instance is handling the session.
+	memoryDerivationWriteMu sync.Mutex
 }
 
 var _ Store = (*d1Store)(nil)
