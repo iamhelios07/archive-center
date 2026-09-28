@@ -27,7 +27,7 @@ import (
 //
 // The four columns that are NOT NULL with a schema default — owner role,
 // visibility, portability, and reveal policy — are bound directly, so a blank in
-// the seed is stored as ''. That is what a row written before those columns
+// the seed is stored as an empty string. That is what a row written before those columns
 // existed looks like, and it is the input the read-side fallback exists for.
 // Binding them as NULL instead would violate the constraint: SQLite applies a
 // column default only when the column is omitted, not when it is given NULL.
@@ -36,25 +36,25 @@ import (
 // bound through d1NullableString so a seed can store an actual NULL and pin the
 // NULL-to-empty-string read.
 type d1ProtagonistMemorySeed struct {
-	personaKey     string
-	personaName    string
-	ownerKey       string
-	ownerName      string
-	role           string
-	visibility     string
-	sessionID      string
-	sourceChar     string
-	sourceTurn     int
-	memoryText     string
-	evidence       string
-	secretGuard    bool
-	portability    string
-	revealPolicy   string
-	tagsJSON       string
-	importance10   float64
+	personaKey      string
+	personaName     string
+	ownerKey        string
+	ownerName       string
+	role            string
+	visibility      string
+	sessionID       string
+	sourceChar      string
+	sourceTurn      int
+	memoryText      string
+	evidence        string
+	secretGuard     bool
+	portability     string
+	revealPolicy    string
+	tagsJSON        string
+	importance10    float64
 	emotionalWeight float64
-	createdAt      string
-	updatedAt      string
+	createdAt       string
+	updatedAt       string
 }
 
 // d1SeedProtagonistMemoryRow inserts one row and returns its id.
@@ -271,9 +271,9 @@ func TestD1CreateProtagonistEntityMemoryIdentityCascade(t *testing.T) {
 		byText[item.MemoryText] = item
 	}
 	for _, want := range []struct {
-		text                      string
-		personaKey, personaName   string
-		ownerKey, ownerName       string
+		text                    string
+		personaKey, personaName string
+		ownerKey, ownerName     string
 	}{
 		{"owner key from persona key", "ent-mira", "Mira", "ent-mira", "Mira"},
 		{"persona key from owner key", "ent-rook", "Rook", "ent-rook", "Rook"},
@@ -468,7 +468,8 @@ func TestD1ListProtagonistEntityMemoriesOwnerFilterPrecedence(t *testing.T) {
 // TestD1ListProtagonistEntityMemoriesScopeFilters pins the conjunctive filters
 // and the rule that a whitespace-only value applies no filter at all.
 //
-// A blank filter applying "= ''" instead of nothing is the failure that matters:
+// A blank filter applying an empty-string equality instead of nothing is the
+// failure that matters:
 // the caller would get a confidently empty list for a session full of memories.
 func TestD1ListProtagonistEntityMemoriesScopeFilters(t *testing.T) {
 	st, conn := newD1TestStore(t)
@@ -681,9 +682,9 @@ func TestD1ListProtagonistEntityMemoriesOwnerLookupAgreesWithOwnerIndex(t *testi
 	// Everything the index names must be readable back by that same key.
 	for _, owner := range owners {
 		items := d1RequireMemories(t, st, ProtagonistEntityMemoryFilter{
-			OwnerEntityKeys:    []string{owner.OwnerEntityKey},
-			OwnerEntityRole:    "npc",
-			OwnerVisibility:    "owner_private",
+			OwnerEntityKeys:     []string{owner.OwnerEntityKey},
+			OwnerEntityRole:     "npc",
+			OwnerVisibility:     "owner_private",
 			SourceChatSessionID: "s1",
 		})
 		if len(items) == 0 {
@@ -704,9 +705,9 @@ func TestD1ListProtagonistEntityMemoriesOwnerLookupAgreesWithOwnerIndex(t *testi
 	// Mira's three same-session rows all come back under her one key, and the
 	// other session's row never does.
 	miraRows := d1RequireMemories(t, st, ProtagonistEntityMemoryFilter{
-		OwnerEntityKeys:    []string{"ent-mira"},
-		OwnerEntityRole:    "npc",
-		OwnerVisibility:    "owner_private",
+		OwnerEntityKeys:     []string{"ent-mira"},
+		OwnerEntityRole:     "npc",
+		OwnerVisibility:     "owner_private",
 		SourceChatSessionID: "s1",
 	})
 	if got := d1SortedStrings(d1MemoryTexts(miraRows)); len(got) != 3 {
@@ -1043,7 +1044,7 @@ func TestD1DeleteProtagonistEntityMemoryReleasesTheOwnerIndex(t *testing.T) {
 		t.Errorf("owners after delete = %v, want only Rook", owners)
 	}
 	if _, ok := d1MemoryByID(d1RequireMemories(t, st, ProtagonistEntityMemoryFilter{
-		OwnerEntityKeys:    []string{"ent-mira"},
+		OwnerEntityKeys:     []string{"ent-mira"},
 		SourceChatSessionID: "s1",
 	}), other); ok {
 		t.Error("Rook's memory must not be reachable through Mira's deleted key")

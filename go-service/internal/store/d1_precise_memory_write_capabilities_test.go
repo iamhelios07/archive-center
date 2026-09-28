@@ -515,12 +515,12 @@ func TestD1SavePreciseMemoryUnitVectorDocumentMatchesTheIndex(t *testing.T) {
 		t.Fatalf("read the queued document: %v", err)
 	}
 	var document struct {
-		ID            string `json:"ID"`
-		ChatSessionID string `json:"ChatSessionID"`
-		SourceTable   string `json:"SourceTable"`
-		SourceRowID   string `json:"SourceRowID"`
-		SchemaVersion string `json:"SchemaVersion"`
-		DocumentText  string `json:"DocumentText"`
+		ID            string         `json:"ID"`
+		ChatSessionID string         `json:"ChatSessionID"`
+		SourceTable   string         `json:"SourceTable"`
+		SourceRowID   string         `json:"SourceRowID"`
+		SchemaVersion string         `json:"SchemaVersion"`
+		DocumentText  string         `json:"DocumentText"`
 		Metadata      map[string]any `json:"Metadata"`
 	}
 	if err := json.Unmarshal([]byte(raw), &document); err != nil {

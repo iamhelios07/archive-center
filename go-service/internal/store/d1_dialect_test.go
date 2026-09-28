@@ -313,9 +313,12 @@ func TestD1PositiveJSONIntegerAndTextHelpers(t *testing.T) {
 }
 
 // TestD1JSONStringBlankPredicateRejectsNonStringValues pins the MariaDB
-// equivalence for COALESCE(JSON_UNQUOTE(JSON_EXTRACT(...)), ”) = ”: absent and
-// explicit null are blank, an empty string is blank, and a non-string value is
-// NOT blank. Treating a JSON number as blank (which the text-or-empty primitive
+// equivalence for the blank predicate:
+//
+//	COALESCE(JSON_UNQUOTE(JSON_EXTRACT(doc, '$.path')), '') = ''
+//
+// absent and explicit null are blank, an empty string is blank, and a non-string
+// value is NOT blank. Treating a JSON number as blank (which the text-or-empty primitive
 // would do) silently admitted a malformed source revision as a valid
 // state_repair correction.
 func TestD1JSONStringBlankPredicateRejectsNonStringValues(t *testing.T) {

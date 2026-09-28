@@ -253,8 +253,11 @@ func (s *d1Store) CreateProtagonistEntityMemory(ctx context.Context, item *Prota
 	out.MemoryText = strings.TrimSpace(item.MemoryText)
 	out.EvidenceExcerpt = strings.TrimSpace(item.EvidenceExcerpt)
 	out.TagsJSON = strings.TrimSpace(item.TagsJSON)
-	out.CreatedAt = now
-	out.UpdatedAt = now
+	// The returned timestamps are the instants that were written, at the
+	// precision they were written at, so a caller comparing the returned record
+	// against a re-read of the row is comparing like with like.
+	out.CreatedAt = d1TimeInstant(now)
+	out.UpdatedAt = d1TimeInstant(now)
 	return &out, nil
 }
 

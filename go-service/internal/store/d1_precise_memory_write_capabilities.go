@@ -94,8 +94,14 @@ func (s *d1Store) PreciseMemoryWritesEnabled() bool { return s != nil && s.conn 
 // d1PreciseMemoryUnitInsert is the MariaDB INSERT with no dialect change. The
 // 41 columns and their order are load-bearing: they are the unit's canonical
 // shape, and reordering them would silently transpose two adjacent fields.
-const d1PreciseMemoryUnitInsert = `
-	INSERT INTO precise_memory_units (
+//
+// The column list and the placeholder list are held apart from the surrounding
+// INSERT so a second writer that must resolve ONE of them in SQL can build the
+// same statement without restating the shape. The admission path does exactly
+// that: it links a unit to the evidence row it was derived from, and that row's
+// id is assigned by the engine inside the same batch, so the column is written
+// as a subquery rather than as a value this provider would have to predict.
+const d1PreciseMemoryUnitColumns = `
 		unit_id, contract_version, chat_session_id, source_turn_start,
 		source_turn_end, source_contract, source_revision,
 		source_logical_turn_id, source_message_id, source_generation_id,
@@ -106,9 +112,55 @@ const d1PreciseMemoryUnitInsert = `
 		location_entity_id, object_entity_id, relationship_key, truth_scope,
 		epistemic_mode, authority_class, admission_state, review_state,
 		visibility, knowledge_holder_entity_id, reveal_condition, confidence,
-		idempotency_key, lifecycle_state, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-	          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		idempotency_key, lifecycle_state, created_at, updated_at`
+
+// d1PreciseMemoryUnitPlaceholders is the positional bind list for the plain
+// statement. It is kept as data rather than as part of a template so a test can
+// assert the argument order and the column order still agree after a refactor.
+var d1PreciseMemoryUnitPlaceholders = strings.Repeat("?,", 41)
+
+// d1PreciseMemoryUnitInsertSQL builds the unit INSERT. An override replaces the
+// value bound to that column with a SQL expression, which is how the admission
+// path binds an id the engine assigns later in the same batch.
+//
+// The override is matched by column NAME and the placeholder list is rebuilt
+// positionally from the column list, not by deleting a "?" — deleting one would
+// silently shift every later argument into the wrong column.
+func d1PreciseMemoryUnitInsertSQL(overrides map[string]string) string {
+	columns := d1PreciseMemoryUnitColumnList()
+	names := make([]string, 0, len(columns))
+	values := make([]string, 0, len(columns))
+	for _, column := range columns {
+		names = append(names, column)
+		if expression, ok := overrides[column]; ok {
+			values = append(values, expression)
+			continue
+		}
+		values = append(values, "?")
+	}
+	return "\n\tINSERT INTO precise_memory_units (" + strings.Join(names, ", ") + ") VALUES (" + strings.Join(values, ", ") + ")"
+}
+
+// d1PreciseMemoryUnitColumnList splits the shared column list into trimmed
+// names, which is what lets an override be addressed by name.
+func d1PreciseMemoryUnitColumnList() []string {
+	parts := strings.Split(d1PreciseMemoryUnitColumns, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// d1PreciseMemoryUnitArgsOrder returns the column names in bind order, so a test
+// can assert that the argument list and the statement still agree.
+func d1PreciseMemoryUnitArgsOrder() []string { return d1PreciseMemoryUnitColumnList() }
+
+// d1PreciseMemoryUnitInsert is the plain statement: every column bound to a
+// value. The admission path builds the same statement with overrides.
+var d1PreciseMemoryUnitInsert = d1PreciseMemoryUnitInsertSQL(nil)
 
 // SavePreciseMemoryUnit commits one precise unit, its derivation dependencies,
 // and its vector outbox operation as a single atomic D1 batch.
@@ -216,8 +268,8 @@ func (s *d1Store) d1RequireActiveSourceRevision(ctx context.Context, chatSession
 //
 // The nullable entity, message, subtype, reveal, and root-evidence columns go
 // through d1NullableString / d1NullablePositiveInt so an absent value is stored
-// as NULL rather than ''. That matters here beyond tidiness: the entity columns
-// are foreign keys, and an empty string is not an entity id. created_at and
+// as NULL rather than the empty string. That matters here beyond tidiness: the
+// entity columns are foreign keys, and an empty string is not an entity id. created_at and
 // updated_at go through d1TimeValue, which supplies the current time for a zero
 // value exactly as nonZeroTime does on the reference path.
 func d1PreciseMemoryUnitArgs(item *PreciseMemoryUnit) []any {

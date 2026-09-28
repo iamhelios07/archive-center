@@ -103,13 +103,20 @@ func d1JSONTextOrEmpty(col, path string) string {
 // d1JSONStringBlankPredicate returns a predicate that is true when the JSON
 // value at path is absent, an explicit JSON null, or an empty string.
 //
-// MariaDB evaluates COALESCE(JSON_UNQUOTE(JSON_EXTRACT(...)), ”) = ”. An
-// absent path and an explicit null both collapse to an empty string, an empty
-// string stays empty, and every other value keeps its own text. A non-string
-// value is therefore NOT blank: a malformed numeric or boolean revision must
-// not pass as a blank one. This cannot be expressed as d1JSONTextOrEmpty(...)
-// = ” because that form maps a JSON number such as 123 to the empty string and
-// would wrongly accept it, while MariaDB compares its text '123' and rejects it.
+// MariaDB collapses an absent path, an explicit JSON null, and an empty string
+// to the same blank value, and keeps every other value's own text:
+//
+//	COALESCE(JSON_UNQUOTE(JSON_EXTRACT(doc, '$.path')), '') = ''
+//
+// (The statement is shown in an indented block rather than inline so it is not
+// rewritten as a typographic quote: the empty string literal is part of the
+// expression, not punctuation around it.)
+//
+// A non-string value is therefore NOT blank: a malformed numeric or boolean
+// revision must not pass as a blank one. This cannot be expressed with the
+// d1JSONTextOrEmpty helper compared against an empty string, because that form
+// maps a JSON number such as 123 to the empty string and would wrongly accept it,
+// while MariaDB compares its text '123' and rejects it.
 func d1JSONStringBlankPredicate(col, path string) string {
 	jsonType := "json_type(" + col + ", " + path + ")"
 	return "(" + jsonType + " IS NULL OR " + jsonType + " = 'null' OR (" + jsonType +

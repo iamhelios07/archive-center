@@ -373,23 +373,72 @@ func d1ToFloat64(value any) (float64, error) {
 }
 
 // d1TimeLayout is how the D1 canonical schema stores timestamps: TEXT in UTC
-// RFC3339 with nanosecond precision. MariaDB DATETIME(3) has millisecond
-// precision, so millisecond values round-trip unchanged.
-const d1TimeLayout = time.RFC3339Nano
+// RFC3339 with a FIXED millisecond fraction.
+//
+// The fixed width is load-bearing, not a style choice. These columns are
+// compared and ordered as TEXT — "ORDER BY updated_at DESC", a lease held while
+// "lease_until > ?", a reprocessing wake cursor — so two representations of the
+// same instant must sort identically, and a variable-width fraction breaks that.
+//
+// RFC3339Nano omits trailing zeros, so it renders an exact-second instant as
+// "2026-03-04T05:06:07Z" with no fractional part at all. Compared as text
+// against "2026-03-04T05:06:07.5Z" from the same second, the '.' (0x2E) sorts
+// before the 'Z' (0x5A), so the LATER instant sorts FIRST. Any ORDER BY on a
+// timestamp could then return rows in the wrong order, and a lease comparison
+// could conclude that a live lease had expired.
+//
+// Millisecond precision is also the precision the rest of the canonical schema
+// already uses: the column defaults are strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+// which is exactly three fractional digits, and MariaDB's DATETIME(3) is
+// milliseconds. Writing the same shape as the schema default means a row created
+// by a default and a row written by the store sort against each other
+// correctly, and a millisecond value still round-trips unchanged.
+const d1TimeLayout = "2006-01-02T15:04:05.000Z"
 
-// parseD1Time accepts the RFC3339 representation the D1 store writes, plus the
-// space-separated form SQLite's CURRENT_TIMESTAMP default produces, so rows
-// created by a schema default remain readable.
+// parseD1Time accepts the canonical fixed-millisecond representation, the
+// variable-width RFC3339Nano form earlier revisions of this provider wrote, and
+// the space-separated form SQLite's CURRENT_TIMESTAMP produces, so a row written
+// by any of them remains readable.
+//
+// Reading is deliberately more permissive than writing. A row is only ever
+// compared against another row through its stored text, and tightening the reader
+// would turn a cosmetic difference into an unreadable timestamp.
 func parseD1Time(text string) (time.Time, error) {
-	if parsed, err := time.Parse(d1TimeLayout, text); err == nil {
-		return parsed.UTC(), nil
-	}
-	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02 15:04:05.999999999"} {
+	for _, layout := range []string{
+		d1TimeLayout,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05.999999999",
+	} {
 		if parsed, err := time.Parse(layout, text); err == nil {
 			return parsed.UTC(), nil
 		}
 	}
 	return time.Time{}, fmt.Errorf("store: d1 cannot parse timestamp %q", text)
+}
+
+// d1TimeInstant returns the instant exactly as it will be stored, at the
+// precision it will be stored at.
+//
+// A caller-visible time.Time must be the instant this provider persisted, not the
+// higher-precision value it was handed. The canonical schema stores milliseconds,
+// so a time.Time carrying nanoseconds and the same time.Time after a round trip
+// through the store are two different values, and a caller that compares them —
+// a test asserting a returned record matches its stored row, or a caller
+// comparing an audit event against the row it describes — would see a
+// discrepancy that does not correspond to anything actually wrong.
+func d1TimeInstant(t time.Time) time.Time {
+	if t.IsZero() {
+		t = time.Now().UTC()
+	}
+	parsed, err := parseD1Time(d1TimeValue(t))
+	if err != nil {
+		// d1TimeValue only ever renders a form parseD1Time accepts, so this is
+		// unreachable; returning the input is the honest fallback.
+		return t.UTC()
+	}
+	return parsed
 }
 
 // d1TimeValue renders a Go time for storage. Zero values become the current UTC
