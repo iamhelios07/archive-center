@@ -1,0 +1,53 @@
+# Build context exclusions for deploy/cloudflare/container.
+#
+# The context is the repository root, because the Dockerfile copies go-service/.
+# That makes this file load-bearing rather than cosmetic: anything not excluded
+# here is a candidate for being copied into a layer, and a layer is published to a
+# registry. A .env or a rendered wrangler.toml inside this context is a secret in
+# an image that anyone with pull access can read, and images are copied, cached
+# and pushed far more freely than files in a repository are.
+
+# The plan names this exclusion first for a reason: a rendered deploy config
+# carries the account id, the D1 database id and the Vectorize index id. It is
+# gitignored, but gitignore does not govern what Docker sends as build context.
+wrangler.toml
+deploy/cloudflare/wrangler.toml
+**/wrangler.toml
+
+# Runtime secrets and local configuration. .env.example is safe and is not
+# matched by these patterns; .env is not.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+
+# Cloudflare local runtime state and the Worker test scratch directory.
+.wrangler/
+.workerd-temp/
+**/.workerd-temp/
+
+# The Worker is deployed by wrangler from its own directory, not baked into the
+# Go backend image. Its node_modules is large and irrelevant here.
+deploy/cloudflare/worker/node_modules/
+
+# Version control and editor state.
+.git/
+.gitattributes
+.github/
+.vscode/
+.idea/
+**/.DS_Store
+
+# Test fixtures and evidence that are large and not needed to compile.
+**/*_test.go
+tests/fixtures/
+mydocs/
+ops/
+
+# Local build output and coverage.
+**/*.exe
+**/*.test
+**/coverage.out
+go-service/archive-center-go
+go-service/archive-center-updater

@@ -71,6 +71,23 @@ func (j *journalingVectorStore) Count(context.Context, string) (int, error) { re
 
 func (j *journalingVectorStore) Close(context.Context) error { return nil }
 
+// unhealthyVectorStore fails its health check, which is how a container whose
+// bridge refuses a connection behaves. VectorOpenError is not set on it, so it
+// exercises the health path rather than the open path.
+type unhealthyVectorStore struct{ journalingVectorStore }
+
+func (u *unhealthyVectorStore) Health(context.Context) (vector.HealthSnapshot, error) {
+	return vector.HealthSnapshot{}, context.DeadlineExceeded
+}
+
+// unreadyVectorStore reports a health check that succeeds but is not ready, which
+// is the third and last preflight path.
+type unreadyVectorStore struct{ journalingVectorStore }
+
+func (u *unreadyVectorStore) Health(context.Context) (vector.HealthSnapshot, error) {
+	return vector.HealthSnapshot{Status: "loading", ModelReady: false}, nil
+}
+
 // TestCloudflareProfileNeverOpensTheChromaRecoveryJournal is the exclusion test.
 //
 // It asserts the GATE, not a call through it, and that distinction is the point.

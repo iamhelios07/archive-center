@@ -42,13 +42,19 @@ const SELF_EXEMPT = new Set([resolve(deployRoot, "scripts", "render-wrangler-con
 const RULES = [
   {
     name: "Cloudflare REST API host",
-    pattern: /api\.cloudflare\.com/i,
+    // Requires the host to be inside a quoted string or an assignment. A runbook
+    // may need to say in prose that the container must not call the REST API, and
+    // a prose mention binds nothing. Requiring a configured form keeps the rule
+    // pointed at what can actually be reached at run time.
+    pattern: /["'=]\s*https?:\/\/api\.cloudflare\.com|api\.cloudflare\.com\s*["']/i,
     why: "the deployment reaches its bindings through the Worker, never the REST API",
+    skipComments: true,
   },
   {
     name: "workers.dev hostname",
-    pattern: /https?:\/\/[A-Za-z0-9-]+\.workers\.dev/i,
+    pattern: /["'=]\s*https?:\/\/[A-Za-z0-9-]+\.workers\.dev|workers\.dev\s*["']/i,
     why: "a tracked hostname ties the repository to one deployment",
+    skipComments: true,
   },
   {
     name: "account or resource id assigned to a literal",
@@ -63,6 +69,22 @@ const RULES = [
     why: "a credential in a tracked file is an incident, not a style problem",
   },
 ];
+
+/**
+ * Returns the line with a leading comment marker removed, or null when the line
+ * is entirely a comment in a language this scanner recognises.
+ *
+ * The Dockerfiles here use `#`, and the TypeScript and Go sources use `//`. A
+ * line that is only a comment cannot execute or configure anything, which is why
+ * the hostname rules skip them and the credential rule does not.
+ */
+function stripLeadingComment(line) {
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith("#") || trimmed.startsWith("//") || trimmed.startsWith("--")) {
+    return null;
+  }
+  return line;
+}
 
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -107,7 +129,9 @@ for (const file of files) {
   const lines = contents.split(/\r?\n/);
   for (const rule of RULES) {
     for (let i = 0; i < lines.length; i++) {
-      if (rule.pattern.test(lines[i])) {
+      const candidate = rule.skipComments ? stripLeadingComment(lines[i]) : lines[i];
+      if (candidate === null) continue;
+      if (rule.pattern.test(candidate)) {
         findings.push({
           file: relative(root, file),
           line: i + 1,
