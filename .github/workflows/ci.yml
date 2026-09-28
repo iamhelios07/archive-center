@@ -65,6 +65,23 @@ jobs:
         # skipped on Linux, where no such rule exists.
         run: npm test
 
+      - name: Cloudflare tracked artifacts are account-neutral
+        # The bridge payload test checks what the provider SENDS. This checks what
+        # the repository CONTAINS, which a payload test cannot see: a Dockerfile
+        # that bakes in a route, a runbook that documents a real database id, or
+        # a template that grew a literal index name.
+        run: node deploy/cloudflare/scripts/check-artifact-neutrality.mjs
+
+      - name: Cloudflare deploy config renders
+        # Validates the tracked template against the renderer without writing
+        # anything, using throwaway identifiers. Deploying an unrendered template
+        # produces a config whose ids are comments, which wrangler accepts and
+        # then fails at runtime on the first query.
+        env:
+          AC_CLOUDFLARE_D1_DATABASE_ID: 00000000-0000-0000-0000-0000000000fa
+          AC_CLOUDFLARE_VECTORIZE_INDEX_ID: 11111111-1111-1111-1111-1111111111fb
+        run: node deploy/cloudflare/scripts/render-wrangler-config.mjs --check
+
       - name: Simple POSIX fresh-install contract
         shell: bash
         run: sh ./scripts/test-simple-fresh-install.sh
