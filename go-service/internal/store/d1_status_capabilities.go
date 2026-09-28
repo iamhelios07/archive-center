@@ -46,6 +46,17 @@ const d1StatusCurrentValueEligible = `
 		  )`
 
 func (s *d1Store) ListStatusCurrentValues(ctx context.Context, chatSessionID, ownerScope, ownerID, statusKey string, limit int) ([]StatusCurrentValue, error) {
+	// -1 requests the complete projection, any other non-positive limit falls back
+	// to the bounded default, and an oversized one is capped. Only a positive
+	// limit emits a LIMIT clause, which is how the MariaDB path expresses the
+	// unbounded -1 case.
+	if limit <= 0 && limit != -1 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
 	sql := d1StatusCurrentValueSelect + d1StatusCurrentValueEligible
 	args := []any{chatSessionID}
 	if trimmed := strings.TrimSpace(ownerScope); trimmed != "" {
