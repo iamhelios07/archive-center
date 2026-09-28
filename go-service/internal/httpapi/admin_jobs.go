@@ -258,6 +258,21 @@ func (m *adminJobManager) get(id string) (map[string]any, bool) {
 	return job.snapshot(), true
 }
 
+// exists answers "is this job in this process", without handing out a snapshot.
+//
+// It exists for the event stream, which has to choose between streaming a live
+// job and answering about a stored one. Using get for that would build a whole
+// snapshot just to compare its key, and a caller that then discarded the result
+// would be doing the expensive part for nothing.
+func (m *adminJobManager) exists(id string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.jobs[strings.TrimSpace(id)] != nil
+}
+
 func (m *adminJobManager) list(limit int) []map[string]any {
 	if m == nil {
 		return []map[string]any{}
@@ -678,6 +693,25 @@ func (s *Server) adminJobSnapshotsAreDurable() bool {
 	return ok
 }
 
+// adminResetRunJobByID reads one durable reset run.
+//
+// The event stream needs it to tell apart two kinds of stored record. A reset run
+// is a presentation over the control plane: its progress advances because a
+// worker is checkpointing into D1, not because this process is executing it, so
+// it has no event stream at all. An interrupted job is different — it is simply
+// over, and the operator should be shown that once and told the stream is done.
+func (s *Server) adminResetRunJobByID(ctx context.Context, id string) (map[string]any, bool, error) {
+	reader, ok := s.Store.(store.AdminResetRunReader)
+	if !ok {
+		return nil, false, nil
+	}
+	run, found, err := reader.GetAdminResetRun(ctx, id)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return adminResetRunJob(run), true, nil
+}
+
 // resetRunsAreDurable reports whether the reset control plane survives a restart,
 // so an operator can tell "no reset has run" from "this deployment cannot record
 // that one ran".
@@ -726,7 +760,54 @@ func (s *Server) handleAdminJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The persisted snapshots, last. They are checked after the live manager and
+	// after the reset control plane so a job this process is actually running is
+	// never shadowed by a stale copy of itself.
+	//
+	// Without this the list and the detail disagreed: a job restored as
+	// interrupted appeared in /admin/jobs and then 404'd on its own url, which is
+	// a worse answer than either omitting it or showing it, because it suggests
+	// the id was wrong rather than that the job is over.
+	if job, found, err := s.persistedAdminJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "admin_job_unavailable", err.Error())
+		return
+	} else if found {
+		writeJSON(w, http.StatusOK, job)
+		return
+	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
+}
+
+// persistedAdminJob reads one stored job snapshot and shapes it for the wire the
+// same way the list does, so a job looks the same however it was asked for.
+func (s *Server) persistedAdminJob(ctx context.Context, id string) (map[string]any, bool, error) {
+	snaps, ok := s.Store.(store.AdminJobSnapshotStore)
+	if !ok {
+		return nil, false, nil
+	}
+	snapshot, found, err := snaps.GetAdminJobSnapshot(ctx, id)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return snapshotJobForWire(snapshot), true, nil
+}
+
+// snapshotJobForWire decodes a stored snapshot, falling back to the columns when
+// the document cannot be decoded. A record that does not parse is still a record
+// that something happened, and the columns carry its identity.
+func snapshotJobForWire(snapshot store.AdminJobSnapshot) map[string]any {
+	var job map[string]any
+	if len(snapshot.SnapshotJSON) == 0 || json.Unmarshal(snapshot.SnapshotJSON, &job) != nil || job == nil {
+		job = map[string]any{
+			"job_id": snapshot.JobID,
+			"kind":   snapshot.Kind,
+			"status": snapshot.Status,
+			"error":  "the stored snapshot could not be decoded; the job record itself is intact",
+		}
+	}
+	job["durable"] = true
+	job["source"] = "d1_admin_jobs"
+	return job
 }
 
 func (s *Server) handleAdminJobEvents(w http.ResponseWriter, r *http.Request) {
@@ -735,15 +816,61 @@ func (s *Server) handleAdminJobEvents(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, "job_id is required")
 		return
 	}
-	if s.AdminJobs == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
-		return
-	}
 	afterRevision, err := strconv.ParseUint(strings.TrimSpace(r.URL.Query().Get("after_revision")), 10, 64)
 	if err != nil && strings.TrimSpace(r.URL.Query().Get("after_revision")) != "" {
 		writeBadRequest(w, "after_revision must be a non-negative integer")
 		return
 	}
+
+	// A job this process is not running has no live stream, but that is not the
+	// same as not existing.
+	//
+	// It used to answer 404, so an operator who opened the stream for a job that
+	// was interrupted by a Container replacement was told the job did not exist —
+	// while /admin/jobs was listing it. Worse, the 404 arrived at exactly the
+	// moment the stream was being used to watch a job, so it read as a broken
+	// endpoint rather than as a finished job.
+	//
+	// A persisted job has no future updates: nothing is executing it. So the
+	// stream emits its final state once and closes, which is what a client
+	// watching a terminal job would have seen anyway.
+	if s.AdminJobs == nil || !s.AdminJobs.exists(id) {
+		job, found, lookupErr := s.persistedAdminJob(r.Context(), id)
+		if lookupErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "admin_job_unavailable", lookupErr.Error())
+			return
+		}
+		if found {
+			w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			// Marked terminal for the client, because there will be no second
+			// line: this is the whole answer.
+			job["terminal"] = true
+			_ = json.NewEncoder(w).Encode(job)
+			return
+		}
+		// A reset run is not a finished job. Its progress advances because a
+		// worker is checkpointing into D1, not because this process is executing
+		// it, so it has no event stream at all. Saying so is more useful than an
+		// empty stream or a bare 404, both of which read as a broken endpoint.
+		if _, resetFound, resetErr := s.adminResetRunJobByID(r.Context(), id); resetErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "admin_job_unavailable", resetErr.Error())
+			return
+		} else if resetFound {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"status":      "not_streamable",
+				"reason_code": "reset_run_has_no_event_stream",
+				"job_id":      id,
+				"detail":      "reset progress is read from /admin/jobs/{id}, not streamed",
+			})
+			return
+		}
+		writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
+		return
+	}
+
 	if _, _, ok := s.AdminJobs.observe(id, afterRevision); !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
 		return
