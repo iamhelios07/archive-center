@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,12 @@ func TestHandleReadyCloudflareProfileBlocksUntilParityComplete(t *testing.T) {
 	}
 	if resp.Checks["store_mode"] != string(config.StoreModeCloudflareAuthority) {
 		t.Errorf("store_mode = %q, want %q", resp.Checks["store_mode"], config.StoreModeCloudflareAuthority)
+	}
+	// The parity gap must be observable: routes gate features on optional
+	// capabilities, so readiness publishes how many the provider satisfies.
+	coverage := resp.Checks["store_capabilities"]
+	if coverage == "" || !strings.Contains(coverage, "/") {
+		t.Errorf("store_capabilities = %q, want an implemented/total report", coverage)
 	}
 }
 

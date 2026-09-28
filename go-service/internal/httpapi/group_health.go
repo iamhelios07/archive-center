@@ -127,6 +127,12 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		} else {
 			checks["cloudflare_bridge"] = "not_configured"
 		}
+		// Report optional-capability coverage explicitly. Routes gate features on
+		// optional interfaces, so an operator needs to see how much of the parity
+		// surface the provider satisfies instead of inferring it from quietly
+		// disabled features.
+		implemented, total := store.CapabilityCoverage(s.Store)
+		checks["store_capabilities"] = strconv.Itoa(implemented) + "/" + strconv.Itoa(total)
 		if s.Cfg.CloudflareProfileReady() {
 			checks["cloudflare_profile"] = "ready"
 			checks["cloudflare_parity"] = "complete"
