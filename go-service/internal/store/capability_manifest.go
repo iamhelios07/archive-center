@@ -62,6 +62,8 @@ var d1CapabilityProbes = []capabilityProbe{
 	{name: "MemoryReprocessingWakeScheduleStore", probe: func(s Store) bool { _, ok := s.(MemoryReprocessingWakeScheduleStore); return ok }},
 	{name: "MemoryVectorOutboxLaneStore", probe: func(s Store) bool { _, ok := s.(MemoryVectorOutboxLaneStore); return ok }},
 	{name: "MemoryVectorOutboxMaintenanceStore", probe: func(s Store) bool { _, ok := s.(MemoryVectorOutboxMaintenanceStore); return ok }},
+	{name: "MemoryAdmissionProjectionInspector", probe: func(s Store) bool { _, ok := s.(MemoryAdmissionProjectionInspector); return ok }},
+	{name: "MemoryVectorMaterializedCompletionStore", probe: func(s Store) bool { _, ok := s.(MemoryVectorMaterializedCompletionStore); return ok }},
 	{name: "MemoryVectorOutboxStore", probe: func(s Store) bool { _, ok := s.(MemoryVectorOutboxStore); return ok }},
 	{name: "PersonaCapsuleStore", probe: func(s Store) bool { _, ok := s.(PersonaCapsuleStore); return ok }},
 	{name: "PreciseMemoryWriteAvailability", probe: func(s Store) bool { _, ok := s.(PreciseMemoryWriteAvailability); return ok }},
@@ -89,10 +91,13 @@ var d1CapabilityProbes = []capabilityProbe{
 	{name: "SessionStateSnapshotReader", probe: func(s Store) bool { _, ok := s.(SessionStateSnapshotReader); return ok }},
 	{name: "SessionStitchStore", probe: func(s Store) bool { _, ok := s.(SessionStitchStore); return ok }},
 	{name: "ShadowStatusReporter", probe: func(s Store) bool { _, ok := s.(ShadowStatusReporter); return ok }},
+	{name: "SourceDiscoveryMutableStore", probe: func(s Store) bool { _, ok := s.(SourceDiscoveryMutableStore); return ok }},
+	{name: "SourceDiscoveryQueryStore", probe: func(s Store) bool { _, ok := s.(SourceDiscoveryQueryStore); return ok }},
 	{name: "SourceDiscoveryStore", probe: func(s Store) bool { _, ok := s.(SourceDiscoveryStore); return ok }},
 	{name: "SourceRevisionHistoryLister", probe: func(s Store) bool { _, ok := s.(SourceRevisionHistoryLister); return ok }},
 	{name: "SourceRevisionStore", probe: func(s Store) bool { _, ok := s.(SourceRevisionStore); return ok }},
 	{name: "StateRepairArtifactReader", probe: func(s Store) bool { _, ok := s.(StateRepairArtifactReader); return ok }},
+	{name: "StatusChangeEventSourceLookupStore", probe: func(s Store) bool { _, ok := s.(StatusChangeEventSourceLookupStore); return ok }},
 	{name: "StatusCurrentValueStore", probe: func(s Store) bool { _, ok := s.(StatusCurrentValueStore); return ok }},
 	{name: "StatusLifecycleStore", probe: func(s Store) bool { _, ok := s.(StatusLifecycleStore); return ok }},
 	{name: "StatusSchemaProposalStore", probe: func(s Store) bool { _, ok := s.(StatusSchemaProposalStore); return ok }},
@@ -103,6 +108,7 @@ var d1CapabilityProbes = []capabilityProbe{
 	{name: "UniqueActiveEntitySurfaceIdentityResolver", probe: func(s Store) bool { _, ok := s.(UniqueActiveEntitySurfaceIdentityResolver); return ok }},
 	{name: "UniqueActiveEntitySurfaceResolver", probe: func(s Store) bool { _, ok := s.(UniqueActiveEntitySurfaceResolver); return ok }},
 	{name: "VectorRecoveryCacheReader", probe: func(s Store) bool { _, ok := s.(VectorRecoveryCacheReader); return ok }},
+	{name: "WorldlineTopologySnapshotStore", probe: func(s Store) bool { _, ok := s.(WorldlineTopologySnapshotStore); return ok }},
 }
 
 // CapabilityReport returns the optional-capability coverage of a store, in a stable

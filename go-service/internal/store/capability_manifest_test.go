@@ -9,9 +9,49 @@ import (
 	"testing"
 )
 
-// routeAssertionRe matches the optional-capability type assertions the HTTP layer
-// performs on the selected store.
-var routeAssertionRe = regexp.MustCompile(`s\.Store\.\(store\.([A-Za-z0-9_]+)\)`)
+// routeAssertionPatterns match every way the HTTP layer asserts an optional
+// capability on the selected store.
+//
+// The first two forms used to be a single pattern anchored on the literal
+// "s.Store", which is narrower than the guard's own stated purpose. A route
+// commonly first narrows the store to the authority it needs and then asserts a
+// SECOND capability on that narrowed value:
+//
+//	discoveryStore, ok := s.sourceDiscoveryAuthorityStore(w)
+//	mutable, ok := discoveryStore.(store.SourceDiscoveryMutableStore)
+//
+// and sometimes switches on the capability rather than asserting it:
+//
+//	switch s.Store.(type) {
+//	case store.WorldlineTopologySnapshotStore:
+//	}
+//
+// Both forms are real capability requirements, and neither was counted. The
+// effect was a manifest that under-reported the parity surface: a route could
+// gate a feature on a capability the D1 provider lacks, take the fallback, and
+// the coverage number would still have looked complete. Any assertion on a
+// store-derived value in this package IS a capability requirement, because the
+// only thing the HTTP layer ever type-asserts against the store package is a
+// store interface.
+var routeAssertionPatterns = []*regexp.Regexp{
+	// Any type assertion whose asserted type comes from the store package.
+	regexp.MustCompile(`\.\(\s*store\.([A-Za-z0-9_]+)\s*\)`),
+	// A type switch case over the store package.
+	regexp.MustCompile(`case\s+store\.([A-Za-z0-9_]+)\s*:`),
+}
+
+// storeInternalContracts are manifest capabilities with no HTTP route consumer.
+//
+// They are listed rather than left out so the coverage report stays an honest
+// denominator, and they are named here so the route guard does not have to
+// pretend a consumer exists. A row is only exempt if it is a contract BETWEEN
+// store implementations (or a proof a caller obtains from the store without an
+// HTTP surface). A capability a user can reach must appear in a route, and this
+// exemption must not become a place to hide one: adding a name here is a
+// deliberate claim that no user-facing route needs it.
+var storeInternalContracts = map[string]string{
+	"MemoryAdmissionProjectionInspector": "proves a committed source marker still has all of its projections; obtained by a store-to-store recovery path, not by an HTTP route",
+}
 
 // TestCapabilityManifestTracksRouteAssertions is the drift guard for the
 // manifest. It re-derives the capability surface from the httpapi source and
@@ -36,12 +76,20 @@ func TestCapabilityManifestTracksRouteAssertions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		for _, match := range routeAssertionRe.FindAllStringSubmatch(string(content), -1) {
-			seen[match[1]] = true
+		for _, pattern := range routeAssertionPatterns {
+			for _, match := range pattern.FindAllStringSubmatch(string(content), -1) {
+				seen[match[1]] = true
+			}
 		}
 	}
 	if len(seen) == 0 {
 		t.Fatal("no store capability assertions found in the httpapi package; the guard is not working")
+	}
+
+	// The store-internal contracts are not route-visible by construction, so
+	// they are folded into the expected set rather than demanded from httpapi.
+	for name := range storeInternalContracts {
+		seen[name] = true
 	}
 
 	listed := map[string]bool{}
