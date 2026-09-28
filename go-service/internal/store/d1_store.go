@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -18,14 +20,11 @@ import (
 // which reproduces the MariaDB behaviour of rejecting a same-key write with a
 // different payload instead of silently overwriting it.
 //
-// The append-only ledger (chat logs, effective inputs, memories) is implemented
-// and tested here. Every remaining canonical method returns
-// errD1Unimplemented rather than silently succeeding, so an unfinished path
-// fails loudly instead of pretending to persist.
-
-// errD1Unimplemented marks canonical methods that this layer does not implement
-// yet. It must never be treated as a successful write.
-var errD1Unimplemented = errors.New("store: d1 method not implemented in this layer")
+// The canonical Store contract is implemented in full. Optional capability
+// interfaces are advertised through Go type assertions: the D1 store implements
+// the ones it supports (currently ActiveScopeStore) and is simply not asserted
+// for the rest, so a missing optional capability can never be mistaken for a
+// silent no-op.
 
 // d1Store implements Store over a D1 transport.
 type d1Store struct {
@@ -38,8 +37,7 @@ var _ Store = (*d1Store)(nil)
 // ListInheritedWorldRules and the world-graph routes depend on.
 var _ ActiveScopeStore = (*d1Store)(nil)
 
-// NewD1Store returns the D1 canonical store over the given transport. The
-// returned value satisfies Store; unimplemented methods return a loud error.
+// NewD1Store returns the D1 canonical store over the given transport.
 func NewD1Store(conn D1Conn) (Store, error) {
 	if conn == nil {
 		return nil, fmt.Errorf("store: d1 connection is required")
@@ -985,19 +983,348 @@ func (s *d1Store) UpsertActiveScope(ctx context.Context, item *SessionActiveScop
 }
 
 // ---------------------------------------------------------------------------
-// not yet implemented
+// character states
 // ---------------------------------------------------------------------------
 
-func (s *d1Store) GetResumePack(context.Context, string, string) (*ResumePack, error) {
-	return nil, errD1Unimplemented
+const d1CharacterStateSelect = `
+		SELECT id, chat_session_id, character_name, appearance_json, personality_json, status_json,
+			   relationships_json, speech_style_json, field_provenance_json, turn_index, created_at, updated_at
+		FROM character_states`
+
+func d1ScanCharacterState(rows D1Rows) (CharacterState, error) {
+	var item CharacterState
+	var appearanceJSON, personalityJSON, statusJSON, relationshipsJSON, speechStyleJSON, fieldProvenanceJSON *string
+	var turnIndex *int64
+	if err := rows.Scan(&item.ID, &item.ChatSessionID, &item.CharacterName,
+		&appearanceJSON, &personalityJSON, &statusJSON, &relationshipsJSON, &speechStyleJSON, &fieldProvenanceJSON,
+		&turnIndex, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return CharacterState{}, err
+	}
+	item.AppearanceJSON = d1DerefString(appearanceJSON)
+	item.PersonalityJSON = d1DerefString(personalityJSON)
+	item.StatusJSON = d1DerefString(statusJSON)
+	item.RelationshipsJSON = d1DerefString(relationshipsJSON)
+	item.SpeechStyleJSON = d1DerefString(speechStyleJSON)
+	item.FieldProvenanceJSON = d1DerefString(fieldProvenanceJSON)
+	item.TurnIndex = int(d1DerefInt64(turnIndex))
+	return item, nil
 }
 
-func (s *d1Store) ListCharacterStates(context.Context, string) ([]CharacterState, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) ListCharacterStates(ctx context.Context, chatSessionID string) ([]CharacterState, error) {
+	// Ordered newest first so the first row seen for a character is its current
+	// snapshot; later rows for the same character are skipped.
+	rows, err := s.conn.Query(ctx, d1CharacterStateSelect+`
+		WHERE chat_session_id = ?
+		ORDER BY turn_index DESC, id DESC
+	`, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []CharacterState
+	seen := map[string]bool{}
+	for rows.Next() {
+		item, err := d1ScanCharacterState(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		key := strings.ToLower(strings.TrimSpace(item.CharacterName))
+		if key == "" {
+			key = strconv.FormatInt(item.ID, 10)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	return d1ApplyCharacterManualEdits(ctx, s.conn, chatSessionID, "", out)
 }
 
-func (s *d1Store) GetCharacterState(context.Context, string, string) (*CharacterState, error) {
-	return nil, errD1Unimplemented
+func (s *d1Store) GetCharacterState(ctx context.Context, chatSessionID, characterName string) (*CharacterState, error) {
+	rows, err := s.conn.Query(ctx, d1CharacterStateSelect+`
+		WHERE chat_session_id = ? AND character_name = ?
+		ORDER BY turn_index DESC, id DESC
+		LIMIT 1
+	`, chatSessionID, characterName)
+	if err != nil {
+		return nil, err
+	}
+	var states []CharacterState
+	if rows.Next() {
+		item, err := d1ScanCharacterState(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		states = append(states, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	states, err = d1ApplyCharacterManualEdits(ctx, s.conn, chatSessionID, characterName, states)
+	if err != nil {
+		return nil, err
+	}
+	if len(states) == 0 {
+		return nil, ErrNotFound
+	}
+	return &states[0], nil
+}
+
+// d1ApplyCharacterManualEdits overlays the latest cumulative operator override
+// per character on the supplied snapshots.
+//
+// It mirrors mariaApplyCharacterManualEdits and reuses the same pure applier, so
+// both providers produce an identical overlay. The durable edits live in
+// character_events rather than in the derived turn snapshots, so the overlay is
+// applied on read. A NULL details_json carries no edits and is treated as such.
+func d1ApplyCharacterManualEdits(ctx context.Context, conn D1Conn, sid, name string, states []CharacterState) ([]CharacterState, error) {
+	rows, err := conn.Query(ctx, `
+		SELECT e.character_name, e.details_json FROM character_events e
+		WHERE e.chat_session_id = ? AND (? = '' OR e.character_name = ?)
+		AND e.event_type = 'manual_character_override'
+		AND e.id = (SELECT MAX(latest.id) FROM character_events latest
+			WHERE latest.chat_session_id = e.chat_session_id AND latest.character_name = e.character_name
+			AND latest.event_type = 'manual_character_override') ORDER BY e.id`, sid, name, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var character string
+		var raw *string
+		if err := rows.Scan(&character, &raw); err != nil {
+			return nil, err
+		}
+		if raw == nil {
+			continue
+		}
+		var record struct {
+			Edits []CharacterManualFieldEdit `json:"edits"`
+		}
+		if err := json.Unmarshal([]byte(*raw), &record); err != nil {
+			return nil, err
+		}
+		if len(record.Edits) == 0 {
+			continue
+		}
+		index := -1
+		for i := range states {
+			if strings.EqualFold(states[i].CharacterName, character) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			states = append(states, CharacterState{ChatSessionID: sid, CharacterName: character})
+			index = len(states) - 1
+		}
+		applyCharacterManualEdits(&states[index], record.Edits)
+	}
+	return states, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// resume pack
+// ---------------------------------------------------------------------------
+
+func (s *d1Store) GetResumePack(ctx context.Context, chatSessionID string, trigger string) (*ResumePack, error) {
+	chapter, err := s.d1LatestChapterSummary(ctx, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	arc, err := s.d1LatestArcSummary(ctx, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+	saga, err := s.d1LatestSagaDigest(ctx, chatSessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Assembly order and text prefixes mirror the MariaDB path exactly, so a
+	// resumed session reads identically on either provider.
+	sources := []string{}
+	parts := []string{}
+	if saga != nil {
+		sources = append(sources, "saga_digests")
+		if saga.ResumePackText != "" {
+			parts = append(parts, "Saga: "+saga.ResumePackText)
+		} else if saga.SagaSummary != "" {
+			parts = append(parts, "Saga: "+saga.SagaSummary)
+		}
+	}
+	if arc != nil {
+		sources = append(sources, "arc_summaries")
+		if arc.ArcResumeText != "" {
+			parts = append(parts, "Arc: "+arc.ArcResumeText)
+		} else if arc.CoreConflict != "" {
+			parts = append(parts, "Arc: "+arc.CoreConflict)
+		}
+	}
+	if chapter != nil {
+		sources = append(sources, "chapter_summaries")
+		if chapter.ChapterTitle != "" {
+			parts = append(parts, "Chapter: "+chapter.ChapterTitle)
+		}
+		if chapter.ResumeText != "" {
+			parts = append(parts, "Resume: "+chapter.ResumeText)
+		}
+		if chapter.SummaryText != "" {
+			parts = append(parts, "Summary: "+chapter.SummaryText)
+		}
+	}
+	if len(sources) == 0 {
+		return &ResumePack{
+			PackStatus:    "empty",
+			Trigger:       trigger,
+			SourcesUsed:   []string{},
+			LayerCount:    0,
+			AssembledText: "",
+			AssemblyNote:  "no hierarchy rows found",
+		}, nil
+	}
+	return &ResumePack{
+		PackStatus:    "ready",
+		Trigger:       trigger,
+		SourcesUsed:   sources,
+		LayerCount:    len(sources),
+		AssembledText: strings.Join(parts, "\n"),
+		Saga:          saga,
+		Arc:           arc,
+		Chapter:       chapter,
+		AssemblyNote:  "assembled from latest saga/arc/chapter rows",
+	}, nil
+}
+
+// d1LatestChapterSummary reads the newest chapter summary, or nil when the
+// session has none. Absence is not an error: an empty pack is a valid state.
+func (s *d1Store) d1LatestChapterSummary(ctx context.Context, chatSessionID string) (*ChapterSummary, error) {
+	var item ChapterSummary
+	var chapterIndex *int64
+	var chapterTitle, summaryText, openLoopsJSON, relationshipChangesJSON, worldChangesJSON *string
+	var callbackCandidatesJSON, resumeText, embeddingVector, embeddingModel *string
+	err := s.conn.QueryRow(ctx, `
+		SELECT id, chat_session_id, from_turn, to_turn, chapter_index, chapter_title, summary_text,
+		       open_loops_json, relationship_changes_json, world_changes_json, callback_candidates_json,
+		       resume_text, embedding_vector, embedding_model, created_at
+		FROM chapter_summaries
+		WHERE chat_session_id = ?
+		ORDER BY chapter_index DESC, id DESC
+		LIMIT 1
+	`, chatSessionID).Scan(
+		&item.ID, &item.ChatSessionID, &item.FromTurn, &item.ToTurn, &chapterIndex, &chapterTitle, &summaryText,
+		&openLoopsJSON, &relationshipChangesJSON, &worldChangesJSON, &callbackCandidatesJSON,
+		&resumeText, &embeddingVector, &embeddingModel, &item.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, errD1NoRows) || errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.ChapterIndex = int(d1DerefInt64(chapterIndex))
+	item.ChapterTitle = d1DerefString(chapterTitle)
+	item.SummaryText = d1DerefString(summaryText)
+	item.OpenLoopsJSON = d1DerefString(openLoopsJSON)
+	item.RelationshipChangesJSON = d1DerefString(relationshipChangesJSON)
+	item.WorldChangesJSON = d1DerefString(worldChangesJSON)
+	item.CallbackCandidatesJSON = d1DerefString(callbackCandidatesJSON)
+	item.ResumeText = d1DerefString(resumeText)
+	item.EmbeddingVector = d1DerefString(embeddingVector)
+	item.EmbeddingModel = d1DerefString(embeddingModel)
+	return &item, nil
+}
+
+func (s *d1Store) d1LatestArcSummary(ctx context.Context, chatSessionID string) (*ArcSummary, error) {
+	var item ArcSummary
+	var arcIndex *int64
+	var arcName, arcStatus, coreConflict, keyTurningPointsJSON, activePromisesJSON *string
+	var unresolvedDebtsJSON, resolvedPayoffsJSON, callbackCandidatesJSON, futurePayoffCandidatesJSON *string
+	var irreversibleTurnsJSON, callbackDebtsJSON, relationshipPivotsJSON, arcResumeText *string
+	var embeddingVector, embeddingModel *string
+	err := s.conn.QueryRow(ctx, `
+		SELECT id, chat_session_id, from_turn, to_turn, arc_index, arc_name, arc_status, core_conflict,
+		       key_turning_points_json, active_promises_json, unresolved_debts_json, resolved_payoffs_json,
+		       callback_candidates_json, future_payoff_candidates_json, irreversible_turns_json, callback_debts_json,
+		       relationship_pivots_json, arc_resume_text, embedding_vector, embedding_model, created_at
+		FROM arc_summaries
+		WHERE chat_session_id = ?
+		ORDER BY arc_index DESC, id DESC
+		LIMIT 1
+	`, chatSessionID).Scan(
+		&item.ID, &item.ChatSessionID, &item.FromTurn, &item.ToTurn, &arcIndex, &arcName, &arcStatus, &coreConflict,
+		&keyTurningPointsJSON, &activePromisesJSON, &unresolvedDebtsJSON, &resolvedPayoffsJSON,
+		&callbackCandidatesJSON, &futurePayoffCandidatesJSON, &irreversibleTurnsJSON, &callbackDebtsJSON,
+		&relationshipPivotsJSON, &arcResumeText, &embeddingVector, &embeddingModel, &item.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, errD1NoRows) || errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.ArcIndex = int(d1DerefInt64(arcIndex))
+	item.ArcName = d1DerefString(arcName)
+	item.ArcStatus = d1DerefString(arcStatus)
+	item.CoreConflict = d1DerefString(coreConflict)
+	item.KeyTurningPointsJSON = d1DerefString(keyTurningPointsJSON)
+	item.ActivePromisesJSON = d1DerefString(activePromisesJSON)
+	item.UnresolvedDebtsJSON = d1DerefString(unresolvedDebtsJSON)
+	item.ResolvedPayoffsJSON = d1DerefString(resolvedPayoffsJSON)
+	item.CallbackCandidatesJSON = d1DerefString(callbackCandidatesJSON)
+	item.FuturePayoffCandidatesJSON = d1DerefString(futurePayoffCandidatesJSON)
+	item.IrreversibleTurnsJSON = d1DerefString(irreversibleTurnsJSON)
+	item.CallbackDebtsJSON = d1DerefString(callbackDebtsJSON)
+	item.RelationshipPivotsJSON = d1DerefString(relationshipPivotsJSON)
+	item.ArcResumeText = d1DerefString(arcResumeText)
+	item.EmbeddingVector = d1DerefString(embeddingVector)
+	item.EmbeddingModel = d1DerefString(embeddingModel)
+	return &item, nil
+}
+
+func (s *d1Store) d1LatestSagaDigest(ctx context.Context, chatSessionID string) (*SagaDigest, error) {
+	var item SagaDigest
+	var eraLabel, sagaSummary, persistentFactsJSON, neverDropCandidatesJSON, resumePackText *string
+	var embeddingVector, embeddingModel *string
+	err := s.conn.QueryRow(ctx, `
+		SELECT id, chat_session_id, from_turn, to_turn, era_label, saga_summary,
+		       persistent_facts_json, never_drop_candidates_json, resume_pack_text,
+		       embedding_vector, embedding_model, created_at
+		FROM saga_digests
+		WHERE chat_session_id = ?
+		ORDER BY to_turn DESC, id DESC
+		LIMIT 1
+	`, chatSessionID).Scan(
+		&item.ID, &item.ChatSessionID, &item.FromTurn, &item.ToTurn, &eraLabel, &sagaSummary,
+		&persistentFactsJSON, &neverDropCandidatesJSON, &resumePackText,
+		&embeddingVector, &embeddingModel, &item.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, errD1NoRows) || errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	item.EraLabel = d1DerefString(eraLabel)
+	item.SagaSummary = d1DerefString(sagaSummary)
+	item.PersistentFactsJSON = d1DerefString(persistentFactsJSON)
+	item.NeverDropCandidatesJSON = d1DerefString(neverDropCandidatesJSON)
+	item.ResumePackText = d1DerefString(resumePackText)
+	item.EmbeddingVector = d1DerefString(embeddingVector)
+	item.EmbeddingModel = d1DerefString(embeddingModel)
+	return &item, nil
 }
 
 // ---------------------------------------------------------------------------

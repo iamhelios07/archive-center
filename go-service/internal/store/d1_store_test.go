@@ -322,30 +322,293 @@ func TestD1StoreBatchIsAtomic(t *testing.T) {
 	}
 }
 
-// TestD1StoreUnimplementedMethodsFailLoudly guards the no-silent-success rule:
-// an unfinished canonical path must return an error, never a nil result that a
-// caller could mistake for a completed write.
-func TestD1StoreUnimplementedMethodsFailLoudly(t *testing.T) {
+// TestD1StoreFullCanonicalSurface re-verifies that the D1 provider now answers
+// the whole base Store contract and that an empty database yields empty reads
+// and a well-formed empty resume pack rather than an unimplemented error.
+func TestD1StoreFullCanonicalSurface(t *testing.T) {
 	st, _ := newD1TestStore(t)
 	ctx := context.Background()
 
-	if err := st.SaveChatLog(ctx, &ChatLog{ChatSessionID: "s1", TurnIndex: 1, Role: "user", Content: "x"}); err != nil {
-		t.Fatalf("implemented path must work: %v", err)
+	var base Store = st
+	_ = base
+
+	pack, err := st.GetResumePack(ctx, "s1", "manual")
+	if err != nil {
+		t.Fatalf("GetResumePack on an empty session must succeed with an empty pack: %v", err)
 	}
-	if _, err := st.GetResumePack(ctx, "s1", "manual"); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("GetResumePack error = %v, want errD1Unimplemented", err)
+	if pack.PackStatus != "empty" || pack.LayerCount != 0 || pack.Trigger != "manual" {
+		t.Errorf("empty resume pack = %+v, want an empty pack carrying the trigger", pack)
 	}
-	if _, err := st.ListCharacterStates(ctx, "s1"); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("ListCharacterStates error = %v, want errD1Unimplemented", err)
+	if pack.SourcesUsed == nil || len(pack.SourcesUsed) != 0 {
+		t.Errorf("empty pack sources = %#v, want an empty non-nil list", pack.SourcesUsed)
 	}
-	if _, err := st.GetCharacterState(ctx, "s1", "hero"); !errors.Is(err, errD1Unimplemented) {
-		t.Errorf("GetCharacterState error = %v, want errD1Unimplemented", err)
+
+	// Representative reads across the surface must all succeed on empty data.
+	if rows, err := st.ListChatLogs(ctx, "s1", 0, 0); err != nil || len(rows) != 0 {
+		t.Errorf("ListChatLogs on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListStorylines(ctx, "s1"); err != nil || len(rows) != 0 {
+		t.Errorf("ListStorylines on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListWorldRules(ctx, "s1"); err != nil || len(rows) != 0 {
+		t.Errorf("ListWorldRules on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListCharacterStates(ctx, "s1"); err != nil || len(rows) != 0 {
+		t.Errorf("ListCharacterStates on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListPendingThreads(ctx, "s1", ""); err != nil || len(rows) != 0 {
+		t.Errorf("ListPendingThreads on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListEpisodeSummaries(ctx, "s1", 0, 0, 0); err != nil || len(rows) != 0 {
+		t.Errorf("ListEpisodeSummaries on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListAuditLogs(ctx, "s1", "", 10); err != nil || len(rows) != 0 {
+		t.Errorf("ListAuditLogs on empty data = %v, %v", rows, err)
+	}
+	if rows, err := st.ListSessions(ctx); err != nil || len(rows) != 0 {
+		t.Errorf("ListSessions on empty data = %v, %v", rows, err)
+	}
+	if stats, err := st.Stats(ctx); err != nil || stats.ChatLogs != 0 || stats.Memories != 0 || stats.KgTriples != 0 {
+		t.Errorf("Stats on empty data = %+v, %v", stats, err)
+	}
+}
+
+// TestD1StoreResumePackAssembly pins the saga/arc/chapter assembly order, the
+// text prefixes, and the newest-row selection the resume path depends on.
+func TestD1StoreResumePackAssembly(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	// Two saga digests: the newest to_turn must win.
+	if _, err := conn.Exec(ctx, `INSERT INTO saga_digests
+		(chat_session_id, from_turn, to_turn, saga_summary) VALUES ('s1', 1, 5, 'old saga')`); err != nil {
+		t.Fatalf("seed old saga: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO saga_digests
+		(chat_session_id, from_turn, to_turn, saga_summary, resume_pack_text)
+		VALUES ('s1', 6, 20, 'new saga', 'resume text')`); err != nil {
+		t.Fatalf("seed new saga: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO arc_summaries
+		(chat_session_id, from_turn, to_turn, arc_index, core_conflict) VALUES ('s1', 1, 20, 1, 'conflict A')`); err != nil {
+		t.Fatalf("seed arc: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO chapter_summaries
+		(chat_session_id, from_turn, to_turn, chapter_index, chapter_title, summary_text, resume_text)
+		VALUES ('s1', 1, 20, 1, 'Chapter One', 'summary body', 'chapter resume')`); err != nil {
+		t.Fatalf("seed chapter: %v", err)
+	}
+
+	pack, err := st.GetResumePack(ctx, "s1", "auto")
+	if err != nil {
+		t.Fatalf("GetResumePack: %v", err)
+	}
+	if pack.PackStatus != "ready" {
+		t.Fatalf("pack status = %q, want ready", pack.PackStatus)
+	}
+	if pack.Trigger != "auto" {
+		t.Errorf("trigger = %q, want auto", pack.Trigger)
+	}
+	if pack.LayerCount != 3 {
+		t.Errorf("layer count = %d, want 3", pack.LayerCount)
+	}
+	wantSources := []string{"saga_digests", "arc_summaries", "chapter_summaries"}
+	for i, want := range wantSources {
+		if pack.SourcesUsed[i] != want {
+			t.Errorf("source %d = %q, want %q", i, pack.SourcesUsed[i], want)
+		}
+	}
+
+	// The resume-pack text takes precedence over the summary for the saga, and
+	// the text order is saga, arc, chapter.
+	if !strings.Contains(pack.AssembledText, "Saga: resume text") {
+		t.Errorf("saga must prefer resume_pack_text: %q", pack.AssembledText)
+	}
+	if strings.Contains(pack.AssembledText, "old saga") {
+		t.Errorf("a stale saga must not appear: %q", pack.AssembledText)
+	}
+	if !strings.Contains(pack.AssembledText, "Arc: conflict A") {
+		t.Errorf("arc must fall back to core_conflict: %q", pack.AssembledText)
+	}
+	if !strings.Contains(pack.AssembledText, "Chapter: Chapter One") ||
+		!strings.Contains(pack.AssembledText, "Resume: chapter resume") ||
+		!strings.Contains(pack.AssembledText, "Summary: summary body") {
+		t.Errorf("chapter lines missing: %q", pack.AssembledText)
+	}
+	if strings.Index(pack.AssembledText, "Saga:") > strings.Index(pack.AssembledText, "Arc:") ||
+		strings.Index(pack.AssembledText, "Arc:") > strings.Index(pack.AssembledText, "Chapter:") {
+		t.Errorf("assembly order must be saga, arc, chapter: %q", pack.AssembledText)
+	}
+
+	// The nested rows must be attached, not just their text.
+	if pack.Saga == nil || pack.Saga.ToTurn != 20 {
+		t.Errorf("newest saga row not selected: %+v", pack.Saga)
+	}
+	if pack.Arc == nil || pack.Arc.CoreConflict != "conflict A" {
+		t.Errorf("arc row not selected: %+v", pack.Arc)
+	}
+	if pack.Chapter == nil || pack.Chapter.ChapterTitle != "Chapter One" {
+		t.Errorf("chapter row not selected: %+v", pack.Chapter)
+	}
+
+	// A session other than s1 has none of these rows.
+	other, err := st.GetResumePack(ctx, "s2", "auto")
+	if err != nil {
+		t.Fatalf("GetResumePack for another session: %v", err)
+	}
+	if other.PackStatus != "empty" {
+		t.Errorf("other session pack status = %q, want empty (session isolation)", other.PackStatus)
 	}
 }
 
 func TestNewD1StoreRejectsNilConn(t *testing.T) {
 	if _, err := NewD1Store(nil); err == nil {
 		t.Error("NewD1Store(nil) must fail")
+	}
+}
+
+func TestD1StoreCharacterStatesNewestPerCharacter(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	// Two snapshots for "hero" and one for "rival". Only the newest hero snapshot
+	// is current, and turn_index DESC decides that.
+	if _, err := conn.Exec(ctx, `INSERT INTO character_states
+		(chat_session_id, character_name, appearance_json, turn_index)
+		VALUES ('s1', 'hero', '{"hair":"black"}', 1)`); err != nil {
+		t.Fatalf("seed hero turn 1: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO character_states
+		(chat_session_id, character_name, appearance_json, turn_index)
+		VALUES ('s1', 'hero', '{"hair":"brown"}', 3)`); err != nil {
+		t.Fatalf("seed hero turn 3: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO character_states
+		(chat_session_id, character_name, status_json, turn_index)
+		VALUES ('s1', 'rival', '{"mood":"calm"}', 2)`); err != nil {
+		t.Fatalf("seed rival: %v", err)
+	}
+	// A different session must not leak in.
+	if _, err := conn.Exec(ctx, `INSERT INTO character_states
+		(chat_session_id, character_name, turn_index) VALUES ('s2', 'other', 9)`); err != nil {
+		t.Fatalf("seed other session: %v", err)
+	}
+
+	states, err := st.ListCharacterStates(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListCharacterStates: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("states = %d, want 2 (one per character)", len(states))
+	}
+	byName := map[string]CharacterState{}
+	for _, state := range states {
+		byName[state.CharacterName] = state
+	}
+	if !strings.Contains(byName["hero"].AppearanceJSON, "brown") {
+		t.Errorf("hero must resolve to the newest snapshot: %s", byName["hero"].AppearanceJSON)
+	}
+	if byName["hero"].TurnIndex != 3 {
+		t.Errorf("hero turn_index = %d, want 3", byName["hero"].TurnIndex)
+	}
+	if byName["rival"].StatusJSON != `{"mood":"calm"}` {
+		t.Errorf("rival status = %q", byName["rival"].StatusJSON)
+	}
+
+	fetched, err := st.GetCharacterState(ctx, "s1", "hero")
+	if err != nil {
+		t.Fatalf("GetCharacterState: %v", err)
+	}
+	if fetched.TurnIndex != 3 {
+		t.Errorf("GetCharacterState turn_index = %d, want 3", fetched.TurnIndex)
+	}
+	if _, err := st.GetCharacterState(ctx, "s1", "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing character error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestD1StoreCharacterManualOverrideOverlay(t *testing.T) {
+	st, conn := newD1TestStore(t)
+	ctx := context.Background()
+
+	if _, err := conn.Exec(ctx, `INSERT INTO character_states
+		(chat_session_id, character_name, appearance_json, turn_index)
+		VALUES ('s1', 'hero', '{"hair":"brown"}', 1)`); err != nil {
+		t.Fatalf("seed hero: %v", err)
+	}
+
+	// Durable operator edits live in character_events, not in the derived
+	// snapshot, so the overlay is applied on read. An older override followed by
+	// a newer one must resolve to the newer edit only.
+	if _, err := conn.Exec(ctx, `INSERT INTO character_events
+		(chat_session_id, character_name, turn_index, event_type, details_json)
+		VALUES ('s1', 'hero', 2, 'manual_character_override', '{"edits":[{"path":["appearance","hair"],"value":"blonde"}]}')`); err != nil {
+		t.Fatalf("seed first override: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO character_events
+		(chat_session_id, character_name, turn_index, event_type, details_json)
+		VALUES ('s1', 'hero', 5, 'manual_character_override', '{"edits":[{"path":["appearance","hair"],"value":"red"}]}')`); err != nil {
+		t.Fatalf("seed second override: %v", err)
+	}
+	// A non-override event must be ignored entirely.
+	if _, err := conn.Exec(ctx, `INSERT INTO character_events
+		(chat_session_id, character_name, turn_index, event_type, details_json)
+		VALUES ('s1', 'hero', 6, 'state_change', '{"edits":[{"path":["appearance","hair"],"value":"green"}]}')`); err != nil {
+		t.Fatalf("seed unrelated event: %v", err)
+	}
+
+	fetched, err := st.GetCharacterState(ctx, "s1", "hero")
+	if err != nil {
+		t.Fatalf("GetCharacterState: %v", err)
+	}
+	if !strings.Contains(fetched.AppearanceJSON, "red") {
+		t.Errorf("the newest override must win: %s", fetched.AppearanceJSON)
+	}
+	if strings.Contains(fetched.AppearanceJSON, "blonde") || strings.Contains(fetched.AppearanceJSON, "green") {
+		t.Errorf("stale or unrelated edits leaked into the overlay: %s", fetched.AppearanceJSON)
+	}
+
+	// The same overlay must apply through the list read.
+	states, err := st.ListCharacterStates(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListCharacterStates: %v", err)
+	}
+	if len(states) != 1 || !strings.Contains(states[0].AppearanceJSON, "red") {
+		t.Errorf("list read must apply the same overlay: %+v", states)
+	}
+
+	// An override for a character with no derived snapshot still surfaces, which
+	// is how an operator-only character remains visible.
+	if _, err := conn.Exec(ctx, `INSERT INTO character_events
+		(chat_session_id, character_name, turn_index, event_type, details_json)
+		VALUES ('s1', 'ghost', 7, 'manual_character_override', '{"edits":[{"path":["status","mood"],"value":"uneasy"}]}')`); err != nil {
+		t.Fatalf("seed ghost override: %v", err)
+	}
+	afterGhost, err := st.ListCharacterStates(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListCharacterStates after ghost: %v", err)
+	}
+	found := false
+	for _, state := range afterGhost {
+		if state.CharacterName == "ghost" {
+			found = true
+			if !strings.Contains(state.StatusJSON, "uneasy") {
+				t.Errorf("ghost override not applied: %s", state.StatusJSON)
+			}
+		}
+	}
+	if !found {
+		t.Error("an override for a character without a snapshot must still appear")
+	}
+
+	// A NULL details_json carries no edits and must not fail the read.
+	if _, err := conn.Exec(ctx, `INSERT INTO character_events
+		(chat_session_id, character_name, turn_index, event_type, details_json)
+		VALUES ('s1', 'nulled', 8, 'manual_character_override', NULL)`); err != nil {
+		t.Fatalf("seed null override: %v", err)
+	}
+	if _, err := st.ListCharacterStates(ctx, "s1"); err != nil {
+		t.Fatalf("a NULL override payload must not break the read: %v", err)
 	}
 }
 

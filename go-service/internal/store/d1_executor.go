@@ -300,6 +300,23 @@ func d1Assign(dest, value any) error {
 			return fmt.Errorf("store: d1 scan cannot store %T into *bool", value)
 		}
 		return nil
+	case **time.Time:
+		// Optional timestamps such as narrative summary created_at stay NULL
+		// rather than being coerced to the zero time.
+		if value == nil {
+			*target = nil
+			return nil
+		}
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("store: d1 scan cannot store %T into **time.Time", value)
+		}
+		parsed, err := parseD1Time(text)
+		if err != nil {
+			return err
+		}
+		*target = &parsed
+		return nil
 	case *time.Time:
 		text, ok := value.(string)
 		if !ok {
