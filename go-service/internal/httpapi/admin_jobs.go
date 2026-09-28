@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/risulongmemory/archive-center-go/internal/store"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -412,19 +413,110 @@ func adminJobProgressPercent(processed, total int) int {
 	return pct
 }
 
+// adminResetRunJob presents a durable D1 reset run in the same shape as an
+// in-process job, so one endpoint can answer for both.
+//
+// The mapping is deliberately lossy in one direction only: a reset run has no
+// per-session identity and no progress bar, so those are absent rather than
+// invented as zeros. An operator reading `processed: 0` would conclude the reset
+// did nothing, which is the opposite of what a completed reset means.
+func adminResetRunJob(run store.AdminResetRun) map[string]any {
+	job := map[string]any{
+		"id":             run.ResetRunID,
+		"kind":           "database_reset",
+		"status":         run.Status,
+		"epoch":          run.Epoch,
+		"rows_deleted":   run.RowsDeleted,
+		"tables_cleared": run.TablesCleared,
+		"retry_count":    run.RetryCount,
+		"started_at":     run.StartedAt,
+		"updated_at":     run.UpdatedAt,
+		// The whole point: this row outlives the process that wrote it.
+		"durable": true,
+		"source":  "d1_reset_runs",
+	}
+	if run.CompletedAt != "" {
+		job["completed_at"] = run.CompletedAt
+	}
+	if run.LastError != "" {
+		job["last_error"] = run.LastError
+	}
+	return job
+}
+
+// durableAdminResetRuns reads the reset control plane when the store can.
+//
+// It returns nil rather than an error when the capability is absent, because a
+// store that cannot persist a reset run is the local runtime, and its in-process
+// job list is the whole truth there. An error is reserved for a store that
+// claims the capability and then fails, since that would otherwise be reported as
+// an empty list — the same silence that made this gap invisible.
+func (s *Server) durableAdminResetRuns(r *http.Request, limit int) ([]map[string]any, error) {
+	reader, ok := s.Store.(store.AdminResetRunReader)
+	if !ok {
+		return nil, nil
+	}
+	runs, err := reader.ListAdminResetRuns(r.Context(), limit)
+	if err != nil {
+		return nil, err
+	}
+	jobs := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		jobs = append(jobs, adminResetRunJob(run))
+	}
+	return jobs, nil
+}
+
 func (s *Server) handleAdminJobs(w http.ResponseWriter, r *http.Request) {
 	limit := intFromAny(r.URL.Query().Get("limit"), 20)
 	jobs := []map[string]any{}
 	if s.AdminJobs != nil {
 		jobs = s.AdminJobs.list(limit)
 	}
+	// Every in-process job is explicitly marked as not durable. Before this, an
+	// operator could not tell a job that would survive a Container restart from
+	// one that would vanish, and the list looked equally trustworthy either way.
+	for _, job := range jobs {
+		if _, present := job["durable"]; !present {
+			job["durable"] = false
+			job["source"] = "process_memory"
+		}
+	}
+
+	// The reset control plane is merged rather than swapped in. A reset is the
+	// destructive operator action, the one with a confirmation token and an epoch
+	// fence, and it is the one whose absence from this list after a restart would
+	// most mislead. The other jobs stay in memory and are still lost; the flag
+	// says so instead of pretending otherwise.
+	durable, err := s.durableAdminResetRuns(r, limit)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "admin_jobs_unavailable", err.Error())
+		return
+	}
+	jobs = append(jobs, durable...)
+
 	sort.SliceStable(jobs, func(i, j int) bool {
 		return strings.Compare(fmt.Sprint(jobs[i]["started_at"]), fmt.Sprint(jobs[j]["started_at"])) > 0
 	})
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"jobs":   jobs,
+		// Stated once, rather than left for the reader to infer from the flags:
+		// on a stateless Container the in-process half of this list is empty after
+		// a restart, and that is the design, not a fault.
+		"durable_source": s.resetRunsAreDurable(),
 	})
+}
+
+// resetRunsAreDurable reports whether the reset control plane survives a restart,
+// so an operator can tell "no reset has run" from "this deployment cannot record
+// that one ran".
+func (s *Server) resetRunsAreDurable() bool {
+	_, ok := s.Store.(store.AdminResetRunReader)
+	return ok
 }
 
 func (s *Server) handleAdminJob(w http.ResponseWriter, r *http.Request) {
@@ -433,25 +525,41 @@ func (s *Server) handleAdminJob(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, "job_id is required")
 		return
 	}
-	if s.AdminJobs == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
-		return
-	}
-	if r.Method == http.MethodDelete {
-		job, ok := s.AdminJobs.cancelJob(id)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
+	if s.AdminJobs != nil {
+		if r.Method == http.MethodDelete {
+			job, ok := s.AdminJobs.cancelJob(id)
+			if !ok {
+				writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
+				return
+			}
+			writeJSON(w, http.StatusOK, job)
 			return
 		}
-		writeJSON(w, http.StatusOK, job)
-		return
+		if job, ok := s.AdminJobs.get(id); ok {
+			if _, present := job["durable"]; !present {
+				job["durable"] = false
+				job["source"] = "process_memory"
+			}
+			writeJSON(w, http.StatusOK, job)
+			return
+		}
 	}
-	job, ok := s.AdminJobs.get(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
-		return
+	// A reset run is looked up after the in-process list, not instead of it. An
+	// operator who bookmarked a reset url expects it to keep working across a
+	// Container restart, and the id is the durable one precisely because the
+	// process that created it is gone.
+	if reader, ok := s.Store.(store.AdminResetRunReader); ok {
+		run, found, err := reader.GetAdminResetRun(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "admin_job_unavailable", err.Error())
+			return
+		}
+		if found {
+			writeJSON(w, http.StatusOK, adminResetRunJob(run))
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusNotFound, map[string]any{"status": "not_found", "job_id": id})
 }
 
 func (s *Server) handleAdminJobEvents(w http.ResponseWriter, r *http.Request) {

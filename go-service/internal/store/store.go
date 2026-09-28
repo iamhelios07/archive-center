@@ -534,6 +534,51 @@ type AdminResetStore interface {
 	ResetAll(ctx context.Context) (AdminResetResult, error)
 }
 
+// AdminResetRun is the durable state of one administrative reset.
+//
+// It is the same row the D1 reset writes as it works, read back for presentation.
+// The distinction matters because the in-process job manager is memory only: on a
+// stateless Container it is empty after a restart, so an operator polling the job
+// list would see nothing and conclude the reset never ran — while it may have
+// completed, or be part way through a resumable chunk, with the truth sitting in
+// this row.
+type AdminResetRun struct {
+	ResetRunID    string
+	Epoch         int64
+	Status        string
+	RowsDeleted   int64
+	TablesCleared int64
+	StartedAt     string
+	UpdatedAt     string
+	CompletedAt   string
+	LastError     string
+	RetryCount    int64
+	// Durable is true because a row was read back at all. It is stated on the
+	// wire so an operator can tell a reset that survives a restart from an
+	// in-process job that does not, without having to know which backend is in
+	// use.
+	Durable bool
+}
+
+// AdminResetRunReader presents durable administrative reset runs.
+//
+// It is separate from AdminResetStore because reading progress is a different
+// permission from performing a destructive reset, and because a store that can
+// reset without being able to report its own progress is the exact failure this
+// interface exists to prevent.
+type AdminResetRunReader interface {
+	// ListAdminResetRuns returns the most recent runs, newest first. limit <= 0
+	// asks for a small default rather than everything: this backs an operator
+	// polling endpoint, and an unbounded read of a table that only grows is a way
+	// to make a recovery console slow exactly when it is being used.
+	ListAdminResetRuns(ctx context.Context, limit int) ([]AdminResetRun, error)
+
+	// GetAdminResetRun returns one run. found=false is a normal answer for an
+	// unknown id, not an error, so the HTTP layer can answer 404 without treating
+	// a stale bookmark as a failure.
+	GetAdminResetRun(ctx context.Context, resetRunID string) (run AdminResetRun, found bool, err error)
+}
+
 // Store is the canonical truth storage contract.
 // It covers the 8 immutable tables identified in the MariaDB schema plan.
 type Store interface {
