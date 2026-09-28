@@ -160,7 +160,11 @@ func buildRecallResult(
 	}
 
 	source := "go_r1_read_shadow"
-	if vectorSource, _ := vectorShadow["source"].(string); vectorSource == "go_r2_chromadb_product_read" {
+	// A live accelerator may be ChromaDB or, on the Cloudflare profile, Vectorize.
+	// Both mean the recall came from a real vector read rather than the shadow, and
+	// the response model must not demote the Cloudflare one to a shadow read.
+	if vectorSource, _ := vectorShadow["source"].(string); vectorSource == "go_r2_chromadb_product_read" ||
+		vectorSource == "go_r2_vectorize_product_read" {
 		source = vectorSource
 	}
 

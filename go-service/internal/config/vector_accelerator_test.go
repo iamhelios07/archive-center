@@ -110,6 +110,45 @@ func TestVectorAcceleratorConfiguredOnChromaKeepsLocalBehaviour(t *testing.T) {
 	}
 }
 
+// TestVectorAcceleratorSelectedNamesTheProductEngine pins the product-level
+// label, which is a different question from reachability.
+//
+// The recall trace names the engine the deployment is BUILT AROUND even while it
+// runs a bounded read shadow with nothing reachable. Collapsing that with
+// reachability would blank a useful label in read-shadow mode and, worse, would
+// let a read shadow be reported as a live read. The Cloudflare profile is the
+// case that must not say ChromaDB.
+func TestVectorAcceleratorSelectedNamesTheProductEngine(t *testing.T) {
+	cloudflare := Config{
+		RuntimeProfile:        RuntimeProfileCloudflare,
+		StoreMode:             StoreModeCloudflareAuthority,
+		VectorMode:            VectorModeCloudflare,
+		CloudflareBridgeURL:   "http://archive-center-bridge.internal",
+		CloudflareBridgeToken: "bridge-token",
+	}
+	if got := cloudflare.VectorAcceleratorSelected(); got != "vectorize" {
+		t.Errorf("VectorAcceleratorSelected() = %q, want %q; a Cloudflare trace must not name ChromaDB", got, "vectorize")
+	}
+	// A half-selected Cloudflare profile must not be mislabelled either.
+	half := cloudflare
+	half.VectorMode = VectorModeExternal
+	if got := half.VectorAcceleratorSelected(); got != "chromadb" {
+		t.Errorf("VectorAcceleratorSelected() = %q, want %q; a profile still on a local vector mode is a MariaDB deployment", got, "chromadb")
+	}
+
+	// The local runtime names ChromaDB even when nothing is reachable: that is a
+	// statement about the product, not about a live connection.
+	for _, cfg := range []Config{
+		{RuntimeProfile: RuntimeProfileCoreLite},
+		{RuntimeProfile: RuntimeProfileCoreLite, VectorMode: VectorModeFallback},
+		{RuntimeProfile: RuntimeProfileFullLocal, VectorMode: VectorModeExternal, ChromaEndpoint: "http://127.0.0.1:8000", ChromaEnabled: true},
+	} {
+		if got := cfg.VectorAcceleratorSelected(); got != "chromadb" {
+			t.Errorf("VectorAcceleratorSelected() = %q, want %q", got, "chromadb")
+		}
+	}
+}
+
 // TestVectorAcceleratorConfiguredIgnoresVectorModeForChroma pins that the
 // Cloudflare branch is selected by the vector MODE, not by the profile name. A
 // half-selected profile must not take the bridge branch and then report

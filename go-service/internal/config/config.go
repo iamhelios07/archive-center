@@ -644,6 +644,28 @@ func (c Config) VectorAcceleratorName() string {
 	return ""
 }
 
+// VectorAcceleratorSelected returns the accelerator family this deployment is
+// BUILT AROUND, whether or not one is currently reachable.
+//
+// It is deliberately separate from VectorAcceleratorName, which answers "can this
+// process reach its accelerator now". The recall trace names the engine the
+// product uses even while it is running a bounded read shadow with nothing
+// reachable, because that label is the product's answer to "which index is this
+// system for", not a claim that a process is connected to one. Collapsing the two
+// would blank that label in read-shadow mode, and — worse — would let a read
+// shadow be reported as a live read.
+//
+// It returns "vectorize" only for the Cloudflare profile and "chromadb"
+// otherwise, because the local runtime is MariaDB with ChromaDB and the Cloudflare
+// runtime is D1 with Vectorize. A profile that has switched neither is still a
+// MariaDB deployment, so naming ChromaDB is the truthful answer, not a default.
+func (c Config) VectorAcceleratorSelected() string {
+	if c.IsCloudflareProfile() || c.VectorMode == VectorModeCloudflare {
+		return "vectorize"
+	}
+	return "chromadb"
+}
+
 // IsLiveCutoverAllowed is the runtime guard for product-mode execution.
 func (c Config) IsLiveCutoverAllowed() bool {
 	return (c.Mode == ModeLive || c.Mode == ModeCutover) &&

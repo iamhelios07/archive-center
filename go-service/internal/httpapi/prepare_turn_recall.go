@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/risulongmemory/archive-center-go/internal/config"
 	"github.com/risulongmemory/archive-center-go/internal/dto"
 	"github.com/risulongmemory/archive-center-go/internal/store"
 	"github.com/risulongmemory/archive-center-go/internal/vector"
@@ -158,6 +159,30 @@ func prepareTurnEffectiveContinuityQuery(req dto.PrepareTurnRequest, recentConve
 	return strings.Join(texts, "\n"), source
 }
 
+// prepareTurnVectorProductReadSource names the product read in the trace.
+//
+// The ChromaDB value is the historical one and is preserved exactly: a consumer
+// compares the trace source against it to decide whether the recall came from a
+// live accelerator rather than the read shadow. Changing it would silently
+// downgrade every Chroma recall to "shadow" in the response models, so the
+// Cloudflare profile gets its own value instead of sharing a wrong one.
+func prepareTurnVectorProductReadSource(cfg config.Config) string {
+	if cfg.VectorAcceleratorSelected() == "vectorize" {
+		return "go_r2_vectorize_product_read"
+	}
+	return "go_r2_chromadb_product_read"
+}
+
+// prepareTurnVectorProductReadNote describes the product read in the trace. It
+// names the engine that is actually serving, because the note is the sentence an
+// operator reads first when a recall looks wrong.
+func prepareTurnVectorProductReadNote(cfg config.Config) string {
+	if cfg.VectorAcceleratorSelected() == "vectorize" {
+		return "R2 product read proof: Vectorize search is enabled as the support-only vector accelerator"
+	}
+	return "R2 product read proof: ChromaDB search is enabled as the support-only vector accelerator"
+}
+
 func (s *Server) prepareTurnVectorShadow(ctx context.Context, req dto.PrepareTurnRequest, limit int, historyScopes ...prepareTurnHistoryScope) map[string]any {
 	return s.prepareTurnVectorShadowWithPreciseCandidateLimits(ctx, req, limit, nil, historyScopes...).Trace
 }
@@ -175,7 +200,7 @@ func (s *Server) prepareTurnVectorShadowWithPreciseCandidateLimits(ctx context.C
 	}
 	shadow := map[string]any{
 		"status":                          "unconfigured",
-		"engine":                          "chromadb",
+		"engine":                          s.Cfg.VectorAcceleratorSelected(),
 		"source":                          "go_r1_read_shadow",
 		"note":                            "ChromaDB is the 2.0 vector accelerator; MariaDB remains canonical truth",
 		"configured":                      s.Cfg.Readiness.ChromaConfigured,
@@ -302,13 +327,19 @@ func (s *Server) prepareTurnVectorShadowWithPreciseCandidateLimits(ctx context.C
 	}
 
 	if s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil {
-		shadow["source"] = "go_r2_chromadb_product_read"
-		shadow["note"] = "R2 product read proof: ChromaDB search is enabled as the support-only vector accelerator"
+		shadow["source"] = prepareTurnVectorProductReadSource(s.Cfg)
+		shadow["note"] = prepareTurnVectorProductReadNote(s.Cfg)
 		shadow["live_retrieval_enabled"] = true
-		shadow["chromadb_live_enabled"] = true
+		// chromadb_live_enabled describes ChromaDB specifically, so it is FALSE on
+		// the Cloudflare profile even though a vector accelerator is live there.
+		// Claiming it would put a factually wrong engine name in a trace an
+		// operator reads to decide which index to repair. vector_accelerator names
+		// the engine that is actually serving.
+		shadow["chromadb_live_enabled"] = s.Cfg.VectorAcceleratorSelected() == "chromadb"
 	} else {
-		shadow["note"] = "R2 bounded recall read drill: ChromaDB vector search remains support-only until endpoint readiness is configured"
+		shadow["note"] = "R2 bounded recall read drill: the vector accelerator remains support-only until endpoint readiness is configured"
 	}
+	shadow["vector_accelerator"] = s.Cfg.VectorAcceleratorName()
 	candidateLimit := limit
 	filter := strings.TrimSpace(clientMetaString(req.ClientMeta, "chroma_filter"))
 	searchSessionIDs := prepareTurnVectorHistorySessionIDs(req.ChatSessionID, historyScopes)
