@@ -109,8 +109,33 @@ func (s *d1Store) RegisterAcceptedSourceRevision(ctx context.Context, source *Me
 	if lifecycle == "" {
 		lifecycle = "active"
 	}
-	_, err = s.conn.Exec(ctx, `INSERT INTO memory_source_revisions (contract_version,source_revision,chat_session_id,logical_turn_id,turn_index,source_message_id,source_generation_id,branch_id,branch_state,raw_user_content,raw_assistant_content,combined_content_hash,user_observed_content_hash,assistant_observed_content_hash,hash_algorithm,host_observed_at_ms,lifecycle_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, contract, source.SourceRevision, source.ChatSessionID, source.LogicalTurnID, source.TurnIndex, d1NullableString(source.SourceMessageID), d1NullableString(source.SourceGenerationID), d1NullableString(source.BranchID), branchState, source.UserContent, source.AssistantContent, source.CombinedContentHash, d1NullableString(source.UserObservedContentHash), d1NullableString(source.AssistantObservedContentHash), source.HashAlgorithm, source.HostObservedAtMS, lifecycle)
+	createdAt := nonZeroTime(source.CreatedAt)
+	updatedAt := nonZeroTime(source.UpdatedAt)
+	if source.UpdatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	_, err = s.conn.Exec(ctx, `INSERT INTO memory_source_revisions (
+		contract_version,source_revision,chat_session_id,logical_turn_id,turn_index,
+		source_message_id,source_generation_id,branch_id,branch_state,raw_user_content,
+		raw_assistant_content,combined_content_hash,user_observed_content_hash,
+		assistant_observed_content_hash,hash_algorithm,host_observed_at_ms,lifecycle_state,
+		superseded_by_revision,invalidation_reason,derived_admission_state,
+		derived_admission_version,derived_extractor_version,derived_index_version,
+		derived_result_hash,derived_result_json,derived_admitted_at,created_at,updated_at
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		contract, source.SourceRevision, source.ChatSessionID, source.LogicalTurnID, source.TurnIndex,
+		d1NullableString(source.SourceMessageID), d1NullableString(source.SourceGenerationID), d1NullableString(source.BranchID),
+		branchState, source.UserContent, source.AssistantContent, source.CombinedContentHash,
+		d1NullableString(source.UserObservedContentHash), d1NullableString(source.AssistantObservedContentHash),
+		source.HashAlgorithm, source.HostObservedAtMS, lifecycle, d1NullableString(source.SupersededByRevision),
+		d1NullableString(source.InvalidationReason), firstNonEmptyString(source.DerivedAdmissionState, "pending"),
+		source.DerivedAdmissionVersion, source.DerivedExtractorVersion, source.DerivedIndexVersion,
+		d1NullableString(source.DerivedResultHash), d1NullableString(source.DerivedResultJSON),
+		d1NullableTime(source.DerivedAdmittedAt), d1TimeValue(createdAt), d1TimeValue(updatedAt))
 	if err != nil {
+		return result, err
+	}
+	if err := s.conn.QueryRow(ctx, `SELECT id FROM memory_source_revisions WHERE chat_session_id = ? AND source_revision = ?`, source.ChatSessionID, source.SourceRevision).Scan(&source.ID); err != nil {
 		return result, err
 	}
 	return SourceRevisionRegistration{Inserted: true}, nil

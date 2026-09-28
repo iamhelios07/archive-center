@@ -55,15 +55,13 @@ const d1SessionRouteBindingSelect = `
 // MariaDB decides between INSERT, UPDATE, and no write at all while it holds the
 // row lock. SQLite has no such lock, so the same decision is encoded here:
 //
-//   - no conflicting row          -> the INSERT branch runs, revision 1,
-//     exactly as MariaDB inserts a new binding;
-//   - conflicting row, guard true -> the DO UPDATE branch runs, revision + 1,
-//     exactly as MariaDB's forced or redirected
-//     UPDATE;
-//   - conflicting row, guard false-> nothing is written, exactly as MariaDB's
-//     idempotent replay branch, which must not bump
-//     the revision of a binding that already carries
-//     the resolved route.
+//   - no conflicting row: the INSERT branch runs with revision 1, exactly as
+//     MariaDB inserts a new binding.
+//   - conflicting row, guard true: the DO UPDATE branch runs with revision + 1,
+//     exactly as MariaDB's forced or redirected UPDATE.
+//   - conflicting row, guard false: nothing is written, exactly as MariaDB's
+//     idempotent replay branch, which must not bump the revision of a binding
+//     that already carries the resolved route.
 //
 // The guard is a bound parameter rather than a literal so the statement text
 // stays constant and the decision travels with the call that made it. A

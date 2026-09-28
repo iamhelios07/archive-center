@@ -486,7 +486,8 @@ func (s *Server) handlePrepareTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	languageContext := completeTurnLanguageContextFromClientMeta(req.ClientMeta)
 	perspectiveContext := prepareTurnPerspectiveContextFromRequest(req)
-	perspectiveContext = resolvePrepareTurnPerspectiveIdentity(r.Context(), s.Store, sid, perspectiveContext)
+	perspectiveResolver, _ := s.Store.(store.UniqueActiveEntitySurfaceResolver)
+	perspectiveContext = resolvePrepareTurnPerspectiveIdentity(r.Context(), perspectiveResolver, sid, perspectiveContext)
 	bodyConfig, bodyTrackingConfigErr := s.effectiveBodyTrackingConfig(r.Context(), sid)
 	if bodyTrackingConfigErr != nil {
 		bodyConfig = bodyTrackingConfig{} // Optional settings failure never blocks ordinary preparation.
