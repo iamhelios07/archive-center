@@ -16,14 +16,14 @@ import (
 // "owner_index_*" read-policy labels). The read returns identities only, never
 // memory text, so the owner index cannot leak the content it indexes.
 //
-// Only this capability is ported here. The surrounding persona family
+// The write and edit lanes over the same table
 // (ProtagonistEntityMemoryStore, ProtagonistEntityMemoryRepairStore,
-// ProtagonistEntityMemoryManagementStore, PersonaCapsuleStore) is NOT: those
-// write or edit protagonist_entity_memories, and a write lane that is not yet
-// ported must not be implied by a read that is. prepare-turn asserts the owner
-// index only inside its ProtagonistEntityMemoryStore branch, so this capability
-// becomes reachable there once the sibling memory store lands; until then it is
-// exercised through the capability manifest.
+// ProtagonistEntityMemoryManagementStore) are ported in
+// d1_protagonist_entity_memory_capabilities.go, which had to land first: a read
+// lane is only meaningful once the rows it reads can be written, and prepare-turn
+// asserts the owner index only inside its ProtagonistEntityMemoryStore branch.
+// PersonaCapsuleStore is still absent; it owns a different table
+// (persona_memory_capsules) and is not in this read's path.
 //
 // What is translated rather than re-derived
 //

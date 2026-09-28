@@ -134,17 +134,20 @@ func TestD1ProtagonistEntityMemoryOwnerIndexIsAdvertised(t *testing.T) {
 		t.Fatal("ProtagonistEntityMemoryOwnerIndexStore is not probed by the capability manifest")
 	}
 
-	// Scope guard: this slice ports the index only. The write and edit lanes
-	// over the same table are still absent, and advertising them would let a
-	// route believe protagonist memory can be persisted on D1.
-	if _, ok := store.(ProtagonistEntityMemoryStore); ok {
-		t.Error("ProtagonistEntityMemoryStore is out of scope and must not be advertised yet")
+	// Scope guard: the index is a READ over protagonist_entity_memories, and it
+	// is only reachable from prepare-turn because the sibling write and edit
+	// lanes over the same table are present. If those were ever removed while
+	// the index stayed, prepare-turn would resolve an owner and then silently
+	// read nothing — the exact "read without its writes" shape this guard
+	// originally existed to prevent, now inverted to pin the dependency.
+	if _, ok := store.(ProtagonistEntityMemoryStore); !ok {
+		t.Error("ProtagonistEntityMemoryStore must be implemented: prepare-turn resolves owners only inside its branch")
 	}
-	if _, ok := store.(ProtagonistEntityMemoryRepairStore); ok {
-		t.Error("ProtagonistEntityMemoryRepairStore is out of scope and must not be advertised yet")
+	if _, ok := store.(ProtagonistEntityMemoryRepairStore); !ok {
+		t.Error("ProtagonistEntityMemoryRepairStore must be implemented alongside the memory store it repairs")
 	}
-	if _, ok := store.(ProtagonistEntityMemoryManagementStore); ok {
-		t.Error("ProtagonistEntityMemoryManagementStore is out of scope and must not be advertised yet")
+	if _, ok := store.(ProtagonistEntityMemoryManagementStore); !ok {
+		t.Error("ProtagonistEntityMemoryManagementStore must be implemented alongside the memory store it manages")
 	}
 }
 
