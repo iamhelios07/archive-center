@@ -125,15 +125,15 @@ func TestSessionStitchBodySettingsPreserveSourceAndRetry(t *testing.T) {
 		"old":     {CycleTrackingEnabled: true, SimulationSeed: "old-seed", Characters: []bodyCharacterConfig{{EntityID: "old-ID", CharacterName: "Mina", GestationDays: 300}}},
 		"current": {AutomaticPregnancyEnabled: true, SimulationSeed: "current-seed", Characters: []bodyCharacterConfig{{EntityID: "new-ID", CharacterName: "Rin", GestationDays: 400}}},
 	}}
-	if err := writeBodyTrackingSettings(original); err != nil {
+	server := &Server{}
+	if err := server.writeBodyTrackingSettings(original); err != nil {
 		t.Fatal(err)
 	}
 	result := &store.SessionStitchResult{TargetSessionID: "combined", Segments: []store.SessionStitchSegment{{SessionID: "old"}, {SessionID: "current"}}, EntityIDMap: map[string]string{"old-ID": "target-old-ID", "new-ID": "target-new-ID"}}
-	server := &Server{}
 	if err := server.stitchBodyTrackingConfig(result); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readBodyTrackingSettings()
+	got, err := server.readBodyTrackingSettings()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,13 +146,13 @@ func TestSessionStitchBodySettingsPreserveSourceAndRetry(t *testing.T) {
 	}
 	combined.Characters[0].GestationDays = 500
 	got.Sessions["combined"] = combined
-	if err := writeBodyTrackingSettings(got); err != nil {
+	if err := server.writeBodyTrackingSettings(got); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.stitchBodyTrackingConfig(result); err != nil {
 		t.Fatal(err)
 	}
-	again, err := readBodyTrackingSettings()
+	again, err := server.readBodyTrackingSettings()
 	if err != nil || again.Sessions["combined"].Characters[0].GestationDays != 500 {
 		t.Fatal("retry reset edited config", err)
 	}

@@ -123,7 +123,7 @@ func (s *Server) handleSessionStitch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) stitchBodyTrackingConfig(result *store.SessionStitchResult) error {
 	s.RuntimeConfigMu.Lock()
 	defer s.RuntimeConfigMu.Unlock()
-	settings, err := readBodyTrackingSettings()
+	settings, err := s.readBodyTrackingSettings()
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func (s *Server) stitchBodyTrackingConfig(result *store.SessionStitchResult) err
 		}
 	}
 	settings.Sessions[result.TargetSessionID] = combined
-	return writeBodyTrackingSettings(settings)
+	return s.writeBodyTrackingSettings(settings)
 }
 
 func (s *Server) handleSessionMigratePreview(w http.ResponseWriter, r *http.Request) {

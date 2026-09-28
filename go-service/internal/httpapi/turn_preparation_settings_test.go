@@ -164,6 +164,99 @@ func TestTurnPreparationSettingsSurviveAStoreRestart(t *testing.T) {
 	}
 }
 
+// TestBodyTrackingSettingsUseTheSameDurableBackend is the reason the body tracking
+// scope was wired at all.
+//
+// Body tracking carries per-session configuration the user sets by hand. On a
+// Cloudflare Container it was reaching a file inside the image layer, so a session
+// that a user configured would revert to defaults on the next cold start, with
+// nothing in the logs to say why.
+func TestBodyTrackingSettingsUseTheSameDurableBackend(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("ARCHIVE_CENTER_DATA_DIR", dataDir)
+
+	durable := newSettingsMemoryStore()
+	first := &Server{Store: durable}
+	original := bodyTrackingSettingsFile{
+		ContractVersion: "body_tracking_settings.v1",
+		Sessions: map[string]bodyTrackingConfig{
+			"sess-a": {CycleTrackingEnabled: true, SimulationSeed: "seed-a"},
+		},
+	}
+	if err := first.writeBodyTrackingSettings(original); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, onStore := durable.documents[settingsKey(store.TurnPreparationScopeBodyTracking, store.TurnPreparationDefaultDocumentKey)]; !onStore {
+		t.Fatal("body tracking went somewhere other than the durable store")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "body-tracking.json")); err == nil {
+		t.Error("body tracking was also written to the container filesystem; a second copy in a discarded layer is a setting that silently disagrees with the real one")
+	}
+
+	// A fresh instance with the filesystem gone entirely, the way a scaled-to-zero
+	// Container has no layer left to read.
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatalf("remove data dir: %v", err)
+	}
+	second := &Server{Store: durable}
+	got, err := second.readBodyTrackingSettings()
+	if err != nil {
+		t.Fatalf("read after restart: %v", err)
+	}
+	if !got.Sessions["sess-a"].CycleTrackingEnabled || got.Sessions["sess-a"].SimulationSeed != "seed-a" {
+		t.Errorf("sessions = %+v, want sess-a to survive with no filesystem at all", got.Sessions)
+	}
+}
+
+// TestBodyTrackingSettingsKeepTheLocalFile is the other half, and the reason the
+// dispatch is on the capability rather than the profile. A managed local install
+// has a real data directory and a working backup story; rewriting a validated,
+// backed-up path to chase parity on a platform that has a filesystem would be a
+// regression, not parity.
+func TestBodyTrackingSettingsKeepTheLocalFile(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("ARCHIVE_CENTER_DATA_DIR", dataDir)
+
+	s := &Server{Store: store.NewNoopStore()}
+	original := bodyTrackingSettingsFile{
+		ContractVersion: "body_tracking_settings.v1",
+		Sessions:        map[string]bodyTrackingConfig{"sess-a": {CycleTrackingEnabled: true}},
+	}
+	if err := s.writeBodyTrackingSettings(original); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "body-tracking.json")); err != nil {
+		t.Fatalf("the local runtime must still write body-tracking.json: %v", err)
+	}
+	got, err := (&Server{Store: store.NewNoopStore()}).readBodyTrackingSettings()
+	if err != nil {
+		t.Fatalf("read from a fresh server: %v", err)
+	}
+	if !got.Sessions["sess-a"].CycleTrackingEnabled {
+		t.Errorf("sessions = %+v, want the file-backed setting to persist", got.Sessions)
+	}
+}
+
+// TestBodyTrackingSettingsRejectAnUnreadableDocument is the same guard the
+// multi-agent document gets, for the same reason: a body tracking file that does
+// not parse can never be read back, so every session's configuration in it is
+// gone and the merge that would repair it has nothing to work from.
+func TestBodyTrackingSettingsRejectAnUnreadableDocument(t *testing.T) {
+	for name, s := range map[string]*Server{
+		"store":      {Store: newSettingsMemoryStore()},
+		"filesystem": {Store: store.NewNoopStore()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ARCHIVE_CENTER_DATA_DIR", t.TempDir())
+			if err := s.saveTurnPreparationDocument(t.Context(),
+				store.TurnPreparationScopeBodyTracking, store.TurnPreparationDefaultDocumentKey,
+				[]byte(`{"sessions":`)); err == nil {
+				t.Error("an unparseable body tracking document was accepted; every session in it would be unrecoverable")
+			}
+		})
+	}
+}
+
 // TestTurnPreparationSettingsRefuseAnUnreadableDocument guards the failure that
 // costs the most: a document that cannot be parsed can never be read back, so the
 // settings merge has nothing to work from and the user's configuration is gone
