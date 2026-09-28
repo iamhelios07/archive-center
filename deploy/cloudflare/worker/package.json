@@ -4,10 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run"
   },
+  "//install": "Install with `npm install --legacy-peer-deps`. npm 10.9.3 aborts this dependency graph with `Cannot read properties of null (reading 'edgesOut')` while resolving the vitest peer set; --legacy-peer-deps skips the crashing code path. A plain `npm install` reproduces the failure even with an empty node_modules.",
+  "//testCoverage": "13 tests run in real workerd. 6 are skipped: Miniflare classifies the Vectorize binding as remote-only, so it has no local simulator, and the D1 simulator needs a backing directory the runtime cannot create in this environment. See test/vector_operations.test.ts.",
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.0.0",
-    "typescript": "^5.0.0"
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
   }
 }
