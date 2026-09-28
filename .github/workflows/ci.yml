@@ -43,6 +43,28 @@ jobs:
       - name: Check JavaScript syntax
         run: node --check "Archive Center.js"
 
+      - name: Install Cloudflare Worker dependencies
+        working-directory: deploy/cloudflare/worker
+        # --legacy-peer-deps is required, not preferred: npm 10.9 aborts this
+        # dependency graph while resolving the vitest peer set with
+        # "Cannot read properties of null (reading 'edgesOut')", and the failure
+        # reproduces from an empty node_modules, so it is a resolver bug rather
+        # than a damaged tree. See deploy/cloudflare/worker/package.json.
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Cloudflare Worker type check
+        working-directory: deploy/cloudflare/worker
+        run: npm run check
+
+      - name: Cloudflare Worker tests
+        working-directory: deploy/cloudflare/worker
+        # Runs the bridge handlers in real workerd against local D1. The runner
+        # script exists because D1 is a disk-backed Durable Object and the
+        # repository carries a Low integrity label; on Windows that makes the
+        # runtime unable to write to the default %TEMP%. The icacls step is
+        # skipped on Linux, where no such rule exists.
+        run: npm test
+
       - name: Simple POSIX fresh-install contract
         shell: bash
         run: sh ./scripts/test-simple-fresh-install.sh
