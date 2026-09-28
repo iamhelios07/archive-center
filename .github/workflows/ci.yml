@@ -45,12 +45,13 @@ jobs:
 
       - name: Install Cloudflare Worker dependencies
         working-directory: deploy/cloudflare/worker
-        # --legacy-peer-deps is required, not preferred: npm 10.9 aborts this
-        # dependency graph while resolving the vitest peer set with
-        # "Cannot read properties of null (reading 'edgesOut')", and the failure
-        # reproduces from an empty node_modules, so it is a resolver bug rather
-        # than a damaged tree. See deploy/cloudflare/worker/package.json.
-        run: npm install --legacy-peer-deps --no-audit --no-fund
+        # npm ci, not npm install. The lockfile is committed and complete, so npm
+        # never resolves the dependency graph, and that resolution is the step
+        # that crashes under npm 10 with "Cannot read properties of null (reading
+        # 'edgesOut')". It is an Arborist bug in the vitest peer set, not a
+        # conflict a flag could report, so --legacy-peer-deps was only ever a way
+        # of skipping the broken code path.
+        run: npm ci --no-audit --no-fund
 
       - name: Cloudflare Worker type check
         working-directory: deploy/cloudflare/worker
