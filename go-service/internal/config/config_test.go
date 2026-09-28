@@ -546,8 +546,7 @@ func TestLoadCloudflareProfile(t *testing.T) {
 	}
 	if strings.Contains(cfg.String(), "bridge-token") {
 		t.Error("String() must never include the Cloudflare bridge token")
-	}
-}
+	}}
 
 func TestLoadCloudflareProfileDefaultsToCloudflareVectorMode(t *testing.T) {
 	t.Setenv("AC_RUNTIME_PROFILE", "cloudflare")

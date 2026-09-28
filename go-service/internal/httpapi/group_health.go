@@ -183,7 +183,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if s.indexRecoveryState.Load() == 2 {
 		checks["chromadb_vector"] = "recovering"
 		checks["chromadb_recovery"] = "running"
-	} else if s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.VectorOpenError == nil {
+	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil {
 		health, healthErr := s.Vector.Health(r.Context())
 		if healthErr == nil && strings.TrimSpace(health.Status) == "ok" && health.ModelReady {
 			checks["chromadb_vector"] = "enabled"
@@ -206,7 +206,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			checks["chromadb_recovery"] = "failed"
 			checks["chromadb_recovery_detail"] = "check diagnostic logs or embedding settings"
 		}
-	} else if s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" {
+	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() {
 		checks["chromadb_vector"] = "open_error"
 		if s.VectorOpenError != nil {
 			checks["chromadb_vector_error"] = s.VectorOpenError.Error()
@@ -243,15 +243,15 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	referenceVectorReady := false
 	referenceVectorDegraded := false
 	switch {
-	case s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.ReferenceVectorOpenError != nil:
+	case s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.ReferenceVectorOpenError != nil:
 		checks["reference_chromadb_vector"] = "open_error"
 		checks["reference_chromadb_vector_error"] = s.ReferenceVectorOpenError.Error()
 		referenceVectorDegraded = true
-	case s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.ReferenceVector == nil:
+	case s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.ReferenceVector == nil:
 		checks["reference_chromadb_vector"] = "unavailable"
 		checks["reference_chromadb_vector_error"] = "reference vector store is not initialized"
 		referenceVectorDegraded = true
-	case s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "":
+	case s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured():
 		health, healthErr := s.ReferenceVector.Health(r.Context())
 		if healthErr == nil && strings.TrimSpace(health.Status) == "ok" && health.ModelReady {
 			checks["reference_chromadb_vector"] = "enabled"

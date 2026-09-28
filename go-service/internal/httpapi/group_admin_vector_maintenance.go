@@ -152,7 +152,7 @@ func (s *Server) adminReindexDerivedArtifacts(ctx context.Context, sid string, c
 		return result
 	}
 	contextualizedReady := usesVoyageContextualizedEmbedding(cfg.Embedder) &&
-		cfg.Embedder.hasConfig() && s.Vector != nil && strings.TrimSpace(s.Cfg.ChromaEndpoint) != ""
+		cfg.Embedder.hasConfig() && s.Vector != nil && s.Cfg.VectorAcceleratorConfigured()
 	if contextualizedReady && contextErr != nil {
 		result.Errors = append(result.Errors, "derived contextualized embedding: "+contextErr.Error())
 		result.Skipped = len(evidenceCandidates) + len(worldRuleCandidates)
@@ -300,7 +300,7 @@ func (s *Server) deleteVectorDocumentsBestEffort(ctx context.Context, ids []stri
 		cleanup["skipped_reason"] = "vector_store_not_configured"
 		return cleanup
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		cleanup["skipped_reason"] = "chromadb_endpoint_not_configured"
 		return cleanup
 	}

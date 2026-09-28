@@ -75,7 +75,7 @@ func (s *Server) ValidateRuntimeDependencies(ctx context.Context) error {
 			return fmt.Errorf("cloudflare d1 startup preflight failed: %w", s.StoreOpenError)
 		}
 	}
-	if !s.Cfg.ChromaEnabled || strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() {
 		return nil
 	}
 	if s.VectorOpenError != nil {
@@ -119,6 +119,30 @@ func NewServer(cfg config.Config) *Server {
 	var referenceVS vector.VectorStore
 	var referenceVectorErr error
 	switch {
+	case cfg.IsCloudflareProfile():
+		// The Cloudflare profile reaches Vectorize only through the Worker bridge,
+		// and the bridge token is the accelerator's credential — there is no
+		// endpoint to hand to a Chroma constructor. An unusable bridge is reported
+		// as a loud open error rather than falling back to the fake store, so an
+		// unwired deployment cannot appear to be persisting a vector index.
+		client, err := cloudflarebridge.NewClient(cfg.CloudflareBridgeURL, cfg.CloudflareBridgeToken, 0)
+		if err != nil {
+			vectorErr = fmt.Errorf("cloudflare bridge client: %w", err)
+			referenceVectorErr = vectorErr
+		} else if provider, err := vector.NewVectorizeStore(client); err != nil {
+			vectorErr = err
+			referenceVectorErr = err
+		} else {
+			// One Vectorize index holds both document families, so the two stores
+			// must stay separable. The discriminator is the document tier, not a
+			// second index: session documents are addressed by chat_session_id and
+			// reference documents by a "reference_" tier prefix, and neither
+			// audience queries the other key. A reference document that acquired a
+			// chat_session_id would leak into a session recall, so the separation
+			// has to be asserted rather than assumed.
+			vs = provider
+			referenceVS = provider
+		}
 	case cfg.ChromaEnabled && strings.TrimSpace(cfg.ChromaEndpoint) != "":
 		vs, vectorErr = vector.NewChromaStore(cfg.ChromaEndpoint, cfg.ChromaCollection, cfg.ChromaAPIPath)
 		referenceVS, referenceVectorErr = vector.NewChromaStore(cfg.ChromaEndpoint, cfg.ReferenceChromaCollection, cfg.ChromaAPIPath)

@@ -179,9 +179,9 @@ func (s *Server) prepareTurnVectorShadowWithPreciseCandidateLimits(ctx context.C
 		"source":                          "go_r1_read_shadow",
 		"note":                            "ChromaDB is the 2.0 vector accelerator; MariaDB remains canonical truth",
 		"configured":                      s.Cfg.Readiness.ChromaConfigured,
-		"chromadb_endpoint_configured":    strings.TrimSpace(s.Cfg.ChromaEndpoint) != "",
+		"chromadb_endpoint_configured":    s.Cfg.VectorAcceleratorConfigured(),
 		"recall_read_drill_enabled":       true,
-		"product_read_enabled":            strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.VectorOpenError == nil,
+		"product_read_enabled":            s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil,
 		"live_retrieval_enabled":          false,
 		"chromadb_live_enabled":           false,
 		"health_checked":                  false,
@@ -301,7 +301,7 @@ func (s *Server) prepareTurnVectorShadowWithPreciseCandidateLimits(ctx context.C
 		}
 	}
 
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.VectorOpenError == nil {
+	if s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil {
 		shadow["source"] = "go_r2_chromadb_product_read"
 		shadow["note"] = "R2 product read proof: ChromaDB search is enabled as the support-only vector accelerator"
 		shadow["live_retrieval_enabled"] = true

@@ -76,7 +76,7 @@ func (s *Server) handleAdminDatabaseReset(w http.ResponseWriter, r *http.Request
 	vectorStatus := "skipped_by_request"
 	if resetVector {
 		switch {
-		case strings.TrimSpace(s.Cfg.ChromaEndpoint) == "":
+		case !s.Cfg.VectorAcceleratorConfigured():
 			vectorStatus = "skipped_no_chroma_endpoint"
 		default:
 			vectorResetter, ok := s.Vector.(adminVectorResetter)

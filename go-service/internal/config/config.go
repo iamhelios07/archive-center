@@ -578,6 +578,72 @@ func (c Config) VectorPolicySatisfied() bool {
 	return !c.VectorRequiresEndpoint() || strings.TrimSpace(c.ChromaEndpoint) != ""
 }
 
+// VectorAcceleratorEnabled reports whether this profile is MEANT to run a vector
+// accelerator at all, as opposed to whether one happens to be reachable.
+//
+// The two questions were previously conflated, and they are genuinely different.
+// A core_lite fallback deployment sets neither, and an explicit AC_CHROMA_ENDPOINT
+// left over in its environment must not turn a deliberately index-less
+// deployment into one that claims an index. Readiness and health ask this one;
+// the mutation and recall call sites ask the other.
+func (c Config) VectorAcceleratorEnabled() bool {
+	if c.VectorMode == VectorModeCloudflare {
+		// The Cloudflare profile selects Vectorize as a required part of the
+		// deployment, not as an optional accelerator, so there is no equivalent of
+		// ChromaEnabled falling to false.
+		return true
+	}
+	return c.ChromaEnabled
+}
+
+// VectorAcceleratorConfigured reports whether this process has a REACHABLE vector
+// accelerator, whichever one the selected profile names.
+//
+// This exists because a dozen call sites had grown their own private answer to
+// the same question, and they did not agree:
+//
+//	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" { /* vector unavailable */ }
+//
+// That test reads as "is a vector accelerator configured?" but it actually asks
+// "is ChromaDB configured?", and on the Cloudflare profile ChromaEndpoint is
+// DELIBERATELY empty — the Cloudflare accelerator is Vectorize, reached through
+// the Worker bridge, and Load even asserts that ChromaEnabled stays false in
+// cloudflare vector mode. Every one of those sites would have reported the
+// vector accelerator unavailable on a deployment that has one, silently turning
+// semantic recall off: sessions would fall back to lexical fill, a clean upsert
+// would skip, and admin reindex would report nothing to do. None of that
+// announces itself as a missing provider.
+//
+// The predicate answers the provider-agnostic question instead, and each call
+// site keeps asking about the thing it actually needs — an endpoint, a
+// collection name, a probe — rather than about a provider it may not be running.
+func (c Config) VectorAcceleratorConfigured() bool {
+	if c.VectorMode == VectorModeCloudflare {
+		// The bridge URL and token are the accelerator's credentials here. The
+		// Cloudflare profile validation already refuses to start without both, so
+		// reaching this with an empty value means the process is misconfigured and
+		// should degrade honestly rather than assume a working accelerator.
+		return strings.TrimSpace(c.CloudflareBridgeURL) != "" && strings.TrimSpace(c.CloudflareBridgeToken) != ""
+	}
+	return strings.TrimSpace(c.ChromaEndpoint) != ""
+}
+
+// VectorAcceleratorName returns the stable, account-neutral label of the
+// configured vector accelerator, for health and readiness reporting.
+//
+// It is a label, not an address: it never contains an endpoint URL, a collection
+// name, an index name, or any credential, because those values are rendered into
+// operator-facing diagnostics.
+func (c Config) VectorAcceleratorName() string {
+	if c.VectorMode == VectorModeCloudflare {
+		return "vectorize"
+	}
+	if strings.TrimSpace(c.ChromaEndpoint) != "" {
+		return "chromadb"
+	}
+	return ""
+}
+
 // IsLiveCutoverAllowed is the runtime guard for product-mode execution.
 func (c Config) IsLiveCutoverAllowed() bool {
 	return (c.Mode == ModeLive || c.Mode == ModeCutover) &&

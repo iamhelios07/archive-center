@@ -30,7 +30,7 @@ func (s *Server) upsertMemoryVector(ctx context.Context, sid string, turnIndex i
 		result.VectorStatus = "vector_not_configured"
 		return
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		result.VectorStatus = "vector_not_configured"
 		return
 	}
@@ -100,7 +100,7 @@ func (s *Server) upsertDerivedArtifactVector(ctx context.Context, sid string, tu
 		result.Warnings = append(result.Warnings, "vector_"+tier+"_embedding_config_missing")
 		return
 	}
-	if s.Vector == nil || strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if s.Vector == nil || !s.Cfg.VectorAcceleratorConfigured() {
 		result.VectorStatus = "vector_not_configured"
 		return
 	}
