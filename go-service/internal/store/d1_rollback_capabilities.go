@@ -153,7 +153,7 @@ func (s *d1Store) DeleteSession(ctx context.Context, sid string) error {
 	}
 
 	now := d1TimeValue(time.Now().UTC())
-	vectorDeletes, err := s.d1SessionVectorDeletes(ctx, sid, revisions)
+	vectorDeletes, err := s.d1KnownVectorDeletes(ctx, sid, revisions, 1)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ type d1VectorDelete struct {
 // d1SessionVectorDeletes is the SQLite/D1 equivalent of MariaDB's known-vector
 // discovery.  It runs before the session batch deletes canonical rows, then the
 // batch atomically makes the delete operations durable with the invalidation.
-func (s *d1Store) d1SessionVectorDeletes(ctx context.Context, sid string, revisions []string) ([]d1VectorDelete, error) {
+func (s *d1Store) d1KnownVectorDeletes(ctx context.Context, sid string, revisions []string, fromTurn int) ([]d1VectorDelete, error) {
 	if len(revisions) == 0 {
 		return nil, nil
 	}
@@ -231,11 +231,11 @@ func (s *d1Store) d1SessionVectorDeletes(ctx context.Context, sid string, revisi
 		}
 	}
 	for _, candidate := range []struct{ tier, query string }{
-		{"memory", `SELECT id FROM memories WHERE chat_session_id = ? AND turn_index >= 1`},
-		{"evidence", `SELECT id FROM direct_evidence_records WHERE chat_session_id = ? AND source_turn_end >= 1`},
-		{"world_rule", `SELECT id FROM world_rules WHERE chat_session_id = ? AND source_turn >= 1`},
+		{"memory", `SELECT id FROM memories WHERE chat_session_id = ? AND turn_index >= ?`},
+		{"evidence", `SELECT id FROM direct_evidence_records WHERE chat_session_id = ? AND source_turn_end >= ?`},
+		{"world_rule", `SELECT id FROM world_rules WHERE chat_session_id = ? AND source_turn >= ?`},
 	} {
-		rows, err := s.conn.Query(ctx, candidate.query, sid)
+		rows, err := s.conn.Query(ctx, candidate.query, sid, fromTurn)
 		if err != nil {
 			return nil, err
 		}
