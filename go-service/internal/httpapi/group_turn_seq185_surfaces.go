@@ -3,6 +3,33 @@ package httpapi
 // ---------------------------------------------------------------------------
 // SEQ-18.5 surfaces (P9 ~ P11, P163 ~ P168, P172 ~ P175, P179 ~ P182,
 // P186 ~ P189, P193 ~ P197)
+//
+// WHY "chromadb" AND "mariadb" APPEAR HERE AND ARE NOT WRONG
+//
+// These builders are RULE AND DECISION CONTRACTS, not reports about the running
+// process. Every one of them carries "truth_authority": false and
+// "dry_run_only": true, and the two that name an engine are describing a rule
+// that was defined in terms of ChromaDB, or a decision that was taken while the
+// deployment was MariaDB plus ChromaDB.
+//
+//   buildChromaIdentitySQLiteHydration and its siblings define how a hit
+//     hydrates to a canonical row, how candidates merge, and what a miss does.
+//     The POLICY is the same on the Cloudflare profile — that is what Stage 4
+//     established — but the contract is named for the engine it was specified
+//     against, and a consumer that matched on the key would break if the name
+//     moved.
+//   buildFirstLiveScopeDecision209 records a decision. Rewriting the engine in a
+//     decision record falsifies it: the decision was not made against Vectorize.
+//
+// Rewriting these values would be the same mistake as making the readiness
+// labels generic. A report that says "mariadb" when the store is D1 sends an
+// operator somewhere that does not exist; a contract that says "chromadb" when
+// it is describing a Chroma rule says what it means.
+//
+// So the live surfaces are the ones that follow the deployment, and those are
+// elsewhere: /ready in group_health.go, and the engine label in the turn
+// preparation diagnostics. TestSeq185ContractSurfacesStayChromaShaped pins this
+// distinction so the next reader does not have to re-derive it.
 // ---------------------------------------------------------------------------
 
 // buildResetAdmin185 defines the Step 18.5 reset administration surface
