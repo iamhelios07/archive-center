@@ -113,6 +113,50 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	checks["store_mode"] = string(s.Cfg.StoreMode)
 	checks["runtime_profile"] = string(s.Cfg.RuntimeProfile)
 	checks["vector_mode"] = string(s.Cfg.VectorMode)
+
+	// Which accelerator this deployment is BUILT AROUND, and whether it is
+	// required or merely available.
+	//
+	// These are emitted before the Cloudflare profile's bootstrap-only early
+	// return on purpose. An operator reading a /ready that says
+	// "cloudflare_parity: incomplete" needs to know the answer to "which vector
+	// engine is this thing even using" now, and that is precisely when the
+	// report was previously silent: the Cloudflare profile is not ready, so it
+	// returned before reaching this block and named no accelerator at all.
+	//
+	// It also used to branch on ChromaEnabled alone, which is false on the
+	// Cloudflare profile, so the answer would have been "mariadb_fallback" —
+	// wrong twice over. The accelerator there is Vectorize, and the canonical
+	// store is D1, so naming MariaDB sends an operator to a store that is not in
+	// the path. A readiness report has to be able to send someone to the right
+	// place.
+	switch {
+	case s.Cfg.VectorMode == config.VectorModeCloudflare:
+		// The Cloudflare profile selects Vectorize as a required part of the
+		// deployment, and its validation refuses to start without the bridge
+		// credentials. There is no "optional" case to report.
+		checks["vector_accelerator"] = "vectorize"
+		checks["vector_engine_policy"] = "vectorize_required"
+	case s.Cfg.ChromaEnabled:
+		checks["vector_accelerator"] = "chromadb"
+		if s.Cfg.VectorRequiresEndpoint() {
+			checks["vector_engine_policy"] = "chromadb_required"
+		} else {
+			checks["vector_engine_policy"] = "chromadb_optional"
+		}
+	case s.Cfg.VectorMode == config.VectorModeOff:
+		checks["vector_accelerator"] = "none"
+		checks["vector_engine_policy"] = "off"
+	default:
+		checks["vector_accelerator"] = "mariadb_fallback"
+		checks["vector_engine_policy"] = "fallback"
+	}
+	// The name the running process actually reports, which is the one an operator
+	// should match against a real index. It is empty when nothing is reachable,
+	// and that empty value is informative: it is the difference between "this
+	// deployment is built around ChromaDB" and "ChromaDB is reachable right now".
+	checks["vector_accelerator_reachable"] = s.Cfg.VectorAcceleratorName()
+
 	if s.StoreOpenError != nil {
 		checks["store_open_error"] = s.StoreOpenError.Error()
 	} else {
@@ -225,20 +269,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			vectorDegraded = true
 		}
 	}
-	if s.Cfg.ChromaEnabled {
-		checks["vector_accelerator"] = "chromadb"
-		if s.Cfg.VectorRequiresEndpoint() {
-			checks["vector_engine_policy"] = "chromadb_required"
-		} else {
-			checks["vector_engine_policy"] = "chromadb_optional"
-		}
-	} else if s.Cfg.VectorMode == config.VectorModeOff {
-		checks["vector_accelerator"] = "none"
-		checks["vector_engine_policy"] = "off"
-	} else {
-		checks["vector_accelerator"] = "mariadb_fallback"
-		checks["vector_engine_policy"] = "fallback"
-	}
+	// The vector accelerator labels are emitted near the top of the report, before
+	// the Cloudflare bootstrap early-return, because an operator reading a
+	// bootstrap-only /ready still needs to know which engine the deployment is
+	// built around. See the block above for the full reasoning.
 
 	referenceVectorReady := false
 	referenceVectorDegraded := false
