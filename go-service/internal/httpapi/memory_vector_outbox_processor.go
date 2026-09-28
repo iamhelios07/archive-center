@@ -19,6 +19,13 @@ const (
 	memoryVectorRetryLimitUnconfigured = "MEMORY_VECTOR_RETRY_LIMIT_UNCONFIGURED"
 	memoryVectorRetryLimitReached      = "MEMORY_VECTOR_RETRY_LIMIT_REACHED"
 	memoryVectorRetryDelay             = time.Second
+	// memoryVectorVisibilityBudget bounds the wait a store is given to make a
+	// write readable before the readback verification. It is deliberately close
+	// to memoryVectorRetryDelay: a wait longer than the retry delay would hold the
+	// lease for longer than the caller would otherwise have waited anyway, and a
+	// wait much shorter than it would send a normal asynchronous write down the
+	// retry path, which is the outcome this is here to avoid.
+	memoryVectorVisibilityBudget = time.Second
 )
 
 type memoryVectorProcessResult struct {
@@ -370,6 +377,26 @@ func (s *Server) processClaimedMemoryVectorOperation(
 			result.CanonicalState = "retryable"
 			result.Failure = err.Error()
 			return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, err.Error())
+		}
+		// A store that applies writes asynchronously is allowed a bounded wait
+		// before the readback below.
+		//
+		// This is not a courtesy. The readback is verified for an exact document
+		// count of one, and on an eventually consistent index a read straight
+		// after the acknowledgement legitimately returns none. Every such failure
+		// costs the outbox one attempt from a bounded budget, and at the limit the
+		// operation is parked PERMANENTLY — so a write that actually succeeded
+		// would end with its document missing from the index and a retry limit
+		// reported to the operator.
+		//
+		// A store that does not implement the waiter is synchronous and is read
+		// back immediately, exactly as before.
+		if waiter, ok := s.Vector.(vector.VectorVisibilityWaiter); ok {
+			if err := waiter.AwaitVisible(vectorCtx, []string{item.DocumentID}, memoryVectorVisibilityBudget); err != nil {
+				result.CanonicalState = "retryable"
+				result.Failure = "vector upsert is not visible yet: " + err.Error()
+				return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, result.Failure)
+			}
 		}
 		reader, ok := s.Vector.(vector.ExactDocumentReader)
 		if !ok {

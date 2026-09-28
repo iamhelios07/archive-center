@@ -4,6 +4,7 @@ package vector
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Common errors.
@@ -49,6 +50,34 @@ type DocumentDeleter interface {
 // use it to verify provider-applied writes without listing a full collection.
 type ExactDocumentReader interface {
 	GetDocuments(ctx context.Context, ids []string) ([]VectorDocument, error)
+}
+
+// VectorVisibilityWaiter is an optional extension for stores whose writes
+// become visible to a read some time after the write is acknowledged.
+//
+// It exists because the outbox verifies an upsert by reading the document back
+// IMMEDIATELY, and a synchronously applied write is what that verification
+// assumes. On an eventually consistent index the readback legitimately returns
+// nothing for a short window, and the verification then reports a count of zero.
+//
+// That is not a cosmetic difference. The outbox counts every failed readback as
+// an attempt, and once the attempt limit is reached the operation is parked as a
+// permanent failure. So a provider that applies writes asynchronously would
+// lose documents from its index permanently and report a retry limit reached
+// for a write that actually succeeded.
+//
+// A store that does not implement this is synchronous, and the caller reads
+// back immediately exactly as before. The knowledge stays in the provider that
+// owns the consistency model, and callers keep working in terms of documents
+// rather than in terms of a specific store's timing.
+type VectorVisibilityWaiter interface {
+	// AwaitVisible blocks until every requested id is readable, the budget is
+	// exhausted, or ctx is done. It returns nil only when all ids were seen.
+	//
+	// A budget expiry is not an error the caller should treat as a failed write:
+	// the write may still land. It is reported so the caller can retry on its own
+	// schedule rather than assuming the mutation never happened.
+	AwaitVisible(ctx context.Context, ids []string, budget time.Duration) error
 }
 
 // DocumentLister is an optional diagnostic extension for full vector integrity

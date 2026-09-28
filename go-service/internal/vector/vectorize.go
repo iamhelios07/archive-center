@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/risulongmemory/archive-center-go/internal/cloudflarebridge"
 )
@@ -701,6 +702,68 @@ func (s *vectorizeStore) queryMatches(ctx context.Context, payload vectorizeQuer
 	}
 	return result.Matches, nil
 }
+
+// AwaitVisible blocks until every requested id is readable.
+//
+// Vectorize acknowledges a mutation with a mutation id and applies it
+// afterwards, so a read immediately after an upsert can legitimately return
+// nothing. The outbox verifies an upsert by reading the document back
+// immediately, and every failed readback costs it an attempt out of a bounded
+// budget; at the limit the operation is parked permanently. Left unhandled, a
+// correctly applied write would be reported as a retry limit reached and its
+// document would never reach the index.
+//
+// Polling is the honest mechanism. The index's processedUpToMutation marker says
+// which mutations have been applied but not when they will be, so it cannot
+// replace a bounded wait.
+//
+// The budget belongs to the caller, and the common case costs exactly one read
+// because the loop checks before it sleeps.
+func (s *vectorizeStore) AwaitVisible(ctx context.Context, ids []string, budget time.Duration) error {
+	clean := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			clean = append(clean, id)
+		}
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+	if budget <= 0 {
+		budget = vectorizeVisibilityBudget
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		found, err := s.GetDocuments(ctx, clean)
+		if err != nil {
+			return err
+		}
+		if len(found) >= len(clean) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf(
+				"vectorize: %d of %d documents are not readable yet after %s; the mutation is asynchronous and may still be applied, so this is not a failed write",
+				len(clean)-len(found), len(clean), budget)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(vectorizeVisibilityPoll):
+		}
+	}
+}
+
+const (
+	// vectorizeVisibilityPoll is the gap between visibility checks. It is short
+	// because the wait happens inside an outbox worker's lease, and a long poll
+	// would hold the claim against other work.
+	vectorizeVisibilityPoll = 25 * time.Millisecond
+	// vectorizeVisibilityBudget bounds the in-line wait. It is short enough that
+	// a genuinely stuck mutation falls through to the outbox's own retry schedule
+	// rather than stalling a worker, and long enough to cover the common case.
+	vectorizeVisibilityBudget = 2 * time.Second
+)
 
 // documentFromMatch maps one match to a VectorDocument. The reserved transport
 // fields are removed from the exposed metadata, because they are this
