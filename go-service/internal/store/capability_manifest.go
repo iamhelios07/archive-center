@@ -30,6 +30,7 @@ var d1CapabilityProbes = []capabilityProbe{
 	{name: "ActiveScopeStore", probe: func(s Store) bool { _, ok := s.(ActiveScopeStore); return ok }},
 	{name: "ActiveSourceRevisionLister", probe: func(s Store) bool { _, ok := s.(ActiveSourceRevisionLister); return ok }},
 	{name: "AdminResetStore", probe: func(s Store) bool { _, ok := s.(AdminResetStore); return ok }},
+	{name: "AdminResetActorStore", probe: func(s Store) bool { _, ok := s.(AdminResetActorStore); return ok }},
 	{name: "AdminJobSnapshotStore", probe: func(s Store) bool { _, ok := s.(AdminJobSnapshotStore); return ok }},
 	{name: "AdminResetRunReader", probe: func(s Store) bool { _, ok := s.(AdminResetRunReader); return ok }},
 	{name: "ArcSummaryStore", probe: func(s Store) bool { _, ok := s.(ArcSummaryStore); return ok }},

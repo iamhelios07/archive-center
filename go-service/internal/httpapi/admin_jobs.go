@@ -561,6 +561,11 @@ func adminResetRunJob(run store.AdminResetRun) map[string]any {
 		"durable": true,
 		"source":  "d1_reset_runs",
 	}
+	// Who asked. Absent when nobody was named, rather than filled with a
+	// placeholder that would be indistinguishable from a real identity later.
+	if run.RequestedBy != "" {
+		job["requested_by"] = run.RequestedBy
+	}
 	if run.CompletedAt != "" {
 		job["completed_at"] = run.CompletedAt
 	}

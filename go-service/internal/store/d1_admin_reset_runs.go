@@ -36,7 +36,7 @@ func (s *d1Store) ListAdminResetRuns(ctx context.Context, limit int) ([]AdminRes
 	rows, err := s.conn.Query(ctx, `
 		SELECT reset_run_id, epoch, status, rows_deleted, tables_cleared,
 		       started_at, updated_at, COALESCE(completed_at, ''),
-		       COALESCE(last_error, ''), retry_count
+		       COALESCE(last_error, ''), retry_count, COALESCE(requested_by, '')
 		FROM d1_reset_runs
 		ORDER BY started_at DESC
 		LIMIT ?`, limit)
@@ -66,7 +66,7 @@ func (s *d1Store) GetAdminResetRun(ctx context.Context, resetRunID string) (Admi
 	row := s.conn.QueryRow(ctx, `
 		SELECT reset_run_id, epoch, status, rows_deleted, tables_cleared,
 		       started_at, updated_at, COALESCE(completed_at, ''),
-		       COALESCE(last_error, ''), retry_count
+		       COALESCE(last_error, ''), retry_count, COALESCE(requested_by, '')
 		FROM d1_reset_runs WHERE reset_run_id = ?`, resetRunID)
 
 	run, err := d1ScanAdminResetRun(row)
@@ -93,7 +93,7 @@ func d1ScanAdminResetRun(source interface{ Scan(...any) error }) (AdminResetRun,
 		retryCount    any
 	)
 	if err := source.Scan(&run.ResetRunID, &epoch, &run.Status, &rowsDeleted, &tablesCleared,
-		&run.StartedAt, &run.UpdatedAt, &run.CompletedAt, &run.LastError, &retryCount); err != nil {
+		&run.StartedAt, &run.UpdatedAt, &run.CompletedAt, &run.LastError, &retryCount, &run.RequestedBy); err != nil {
 		if errors.Is(err, errD1NoRows) {
 			return AdminResetRun{}, err
 		}

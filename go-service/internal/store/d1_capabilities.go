@@ -54,6 +54,21 @@ const d1ResetEpochRowID = 1
 //  5. sqlite_sequence is never touched, preserving AUTOINCREMENT monotonicity
 //     exactly as the MariaDB DELETE-based reset does.
 func (s *d1Store) ResetAll(ctx context.Context) (AdminResetResult, error) {
+	return s.ResetAllAs(ctx, "")
+}
+
+// ResetAllAs is ResetAll plus the actor recorded in the reset run.
+//
+// The row already had a requested_by column that nothing wrote, so a completed
+// reset could report what it deleted and never who asked for it. The plan calls
+// for the reset's confirmation/authorization/audit semantics to be preserved, and
+// a column that is declared but never filled is the audit half of that left
+// undone: it reads as if the actor were recorded somewhere.
+//
+// An empty actor is stored as empty. Writing a placeholder would produce an audit
+// entry that cannot be told apart from a real identity later, which is worse than
+// an absent one.
+func (s *d1Store) ResetAllAs(ctx context.Context, actor string) (AdminResetResult, error) {
 	var result AdminResetResult
 
 	generatedRunID, err := d1NewResetRunID()
@@ -61,6 +76,7 @@ func (s *d1Store) ResetAll(ctx context.Context) (AdminResetResult, error) {
 		return result, fmt.Errorf("store: reset run id: %w", err)
 	}
 	now := d1TimeValue(time.Time{})
+	normalizedActor := NormalizeAdminResetActor(actor)
 
 	if _, err := s.conn.Exec(ctx, `
 		UPDATE d1_maintenance_lease
@@ -75,7 +91,7 @@ func (s *d1Store) ResetAll(ctx context.Context) (AdminResetResult, error) {
 		return result, err
 	}
 
-	runID, tableIndex, cursor, rowsDeleted, tablesCleared, err := s.d1ResumeOrStartReset(ctx, generatedRunID, fencingToken, now)
+	runID, tableIndex, cursor, rowsDeleted, tablesCleared, err := s.d1ResumeOrStartReset(ctx, generatedRunID, fencingToken, now, normalizedActor)
 	if err != nil {
 		return result, err
 	}
@@ -138,7 +154,7 @@ func (s *d1Store) ResetAll(ctx context.Context) (AdminResetResult, error) {
 
 // d1ResumeOrStartReset continues an interrupted run or opens a new one, returning
 // the run id and its persisted cursor.
-func (s *d1Store) d1ResumeOrStartReset(ctx context.Context, runID string, fencingToken int64, now string) (
+func (s *d1Store) d1ResumeOrStartReset(ctx context.Context, runID string, fencingToken int64, now, actor string) (
 	activeRun string, tableIndex int, cursor int64, rowsDeleted int64, tablesCleared int, err error,
 ) {
 	var existingRunID, lastKey string
@@ -161,8 +177,10 @@ func (s *d1Store) d1ResumeOrStartReset(ctx context.Context, runID string, fencin
 			resumedCursor = parsed
 		}
 		if _, updateErr := s.conn.Exec(ctx, `
-			UPDATE d1_reset_runs SET status = 'running', fencing_token = ?, updated_at = ?
-			WHERE reset_run_id = ?`, fencingToken, now, existingRunID); updateErr != nil {
+			UPDATE d1_reset_runs
+			SET status = 'running', fencing_token = ?, updated_at = ?,
+			    requested_by = COALESCE(NULLIF(requested_by, ''), NULLIF(?, ''))
+			WHERE reset_run_id = ?`, fencingToken, now, actor, existingRunID); updateErr != nil {
 			return "", 0, 0, 0, 0, updateErr
 		}
 		return existingRunID, existingIndex, resumedCursor, existingRows, existingCleared, nil
@@ -183,9 +201,9 @@ func (s *d1Store) d1ResumeOrStartReset(ctx context.Context, runID string, fencin
 	}
 	if _, err := s.conn.Exec(ctx, `
 		INSERT INTO d1_reset_runs
-			(reset_run_id, epoch, status, table_index, rows_deleted, tables_cleared, started_at, updated_at, fencing_token, confirmation)
-		VALUES (?, ?, 'running', 0, 0, 0, ?, ?, ?, ?)`,
-		runID, epoch+1, now, now, fencingToken, adminResetConfirmation); err != nil {
+			(reset_run_id, epoch, status, table_index, rows_deleted, tables_cleared, started_at, updated_at, fencing_token, confirmation, requested_by)
+		VALUES (?, ?, 'running', 0, 0, 0, ?, ?, ?, ?, ?)`,
+		runID, epoch+1, now, now, fencingToken, adminResetConfirmation, actor); err != nil {
 		return "", 0, 0, 0, 0, err
 	}
 	return runID, 0, 0, 0, 0, nil
