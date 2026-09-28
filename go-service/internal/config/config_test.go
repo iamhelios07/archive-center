@@ -520,6 +520,12 @@ func TestLoadCloudflareProfile(t *testing.T) {
 	t.Setenv("AC_STORE_MODE", "cloudflare_authority")
 	t.Setenv("AC_CLOUDFLARE_BRIDGE_URL", "http://archive-center-bridge.internal")
 	t.Setenv("AC_CLOUDFLARE_BRIDGE_TOKEN", "bridge-token")
+	// The Cloudflare profile is the one deployment shape that is reachable from
+	// the internet, so it is the one shape that must not run without operator
+	// authentication. authMiddleware is a pass-through when this is unset, which
+	// would leave POST /admin/database-reset answering anyone who asked.
+	t.Setenv("AC_ENFORCE_AUTH", "true")
+	t.Setenv("AC_BEARER_TOKEN", "operator-token")
 
 	cfg := Load()
 
@@ -546,7 +552,8 @@ func TestLoadCloudflareProfile(t *testing.T) {
 	}
 	if strings.Contains(cfg.String(), "bridge-token") {
 		t.Error("String() must never include the Cloudflare bridge token")
-	}}
+	}
+}
 
 func TestLoadCloudflareProfileDefaultsToCloudflareVectorMode(t *testing.T) {
 	t.Setenv("AC_RUNTIME_PROFILE", "cloudflare")

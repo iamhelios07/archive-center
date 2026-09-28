@@ -61,8 +61,13 @@ func cloudflareVectorConfig() config.Config {
 		VectorMode:            config.VectorModeCloudflare,
 		CloudflareBridgeURL:   "http://archive-center-bridge.internal",
 		CloudflareBridgeToken: "bridge-token",
-		ChromaEnabled:         false,
-		ChromaEndpoint:        "",
+		// This profile is reachable from the internet, so Validate() requires
+		// operator authentication. Every fixture here has to carry it, and a
+		// fixture that forgets will fail loudly at Validate() rather than
+		// silently testing an unauthenticated deployment.
+		Auth:           config.AuthConfig{Enforce: true, BearerToken: "operator-token"},
+		ChromaEnabled:  false,
+		ChromaEndpoint: "",
 	}
 }
 

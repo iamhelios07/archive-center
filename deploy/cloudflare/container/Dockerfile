@@ -91,6 +91,13 @@ ENV AC_LOG_DIR=/var/log/archive-center \
 # connection refused that looks like a crashed container.
 USER 65532:65532
 
+# Operator authentication is NOT set here and must not be. This profile is
+# reachable from the internet, so Validate() refuses to start without
+# AC_ENFORCE_AUTH=true and a non-empty AC_BEARER_TOKEN, and the platform
+# supplies both. Baking a token into the image would put it in a layer that
+# is pushed, cached and pullable, which is the opposite of what the
+# requirement is for.
+
 COPY --from=build --chown=65532:65532 /out/var-log-archive-center /var/log/archive-center
 COPY --from=build /out/archive-center-go /usr/local/bin/archive-center-go
 

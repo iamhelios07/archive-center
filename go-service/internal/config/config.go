@@ -473,6 +473,28 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.CloudflareBridgeURL) == "" || strings.TrimSpace(c.CloudflareBridgeToken) == "" {
 			return fmt.Errorf("config: runtime_profile %q requires AC_CLOUDFLARE_BRIDGE_URL and AC_CLOUDFLARE_BRIDGE_TOKEN", RuntimeProfileCloudflare)
 		}
+		// Operator routes are reachable from the internet on this profile and
+		// nowhere else. A local installation listens on loopback or a LAN the
+		// operator chose; a Cloudflare Container is given a public address by the
+		// platform as the whole point of running it there.
+		//
+		// authMiddleware is a pass-through unless Auth.Enforce is set, and that
+		// default is right for a loopback service and wrong here. Without this,
+		// POST /admin/database-reset answers anyone who asks. The route's own
+		// confirmation token is not a substitute: it is a constant compiled into
+		// the binary and readable in the source, so it prevents a mistyped reset
+		// and authorises nothing.
+		//
+		// This is the difference between a deployment that is merely reachable and
+		// one that is merely defenceless, so it is a startup failure rather than a
+		// warning: an operator who cannot set a token cannot run this profile, and
+		// should be told that here rather than discovering it from an audit log.
+		if !c.Auth.Enforce {
+			return fmt.Errorf("config: runtime_profile %q requires operator authentication; set AC_ENFORCE_AUTH=true and AC_BEARER_TOKEN, because this profile is reachable from the internet", RuntimeProfileCloudflare)
+		}
+		if strings.TrimSpace(c.Auth.BearerToken) == "" {
+			return fmt.Errorf("config: runtime_profile %q requires a non-empty AC_BEARER_TOKEN; an enforced empty token would reject every request including the operator's own", RuntimeProfileCloudflare)
+		}
 	}
 	if c.StoreMode == StoreModeCloudflareAuthority && c.RuntimeProfile != RuntimeProfileCloudflare {
 		return fmt.Errorf("config: store_mode %q requires runtime_profile %q", StoreModeCloudflareAuthority, RuntimeProfileCloudflare)
