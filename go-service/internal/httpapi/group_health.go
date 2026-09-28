@@ -186,8 +186,28 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		// optional interfaces, so an operator needs to see how much of the parity
 		// surface the provider satisfies instead of inferring it from quietly
 		// disabled features.
-		implemented, total := store.CapabilityCoverage(s.Store)
-		checks["store_capabilities"] = strconv.Itoa(implemented) + "/" + strconv.Itoa(total)
+		//
+		// The names are reported alongside the ratio because the ratio alone is not
+		// actionable: "85/86" says a capability is missing without saying which,
+		// so the reader cannot work out whether it matters. And the denominator
+		// here excludes the capabilities this profile CANNOT have, so a complete
+		// Cloudflare deployment can reach N/N rather than sitting one short
+		// forever. Every exclusion carries a reason in store.capabilityExemptions.
+		profile := string(s.Cfg.RuntimeProfile)
+		implemented, applicable, total := store.CapabilityCoverageForProfile(s.Store, profile)
+		checks["store_capabilities"] = strconv.Itoa(implemented) + "/" + strconv.Itoa(applicable)
+		if missing := store.MissingApplicableCapabilities(s.Store, profile); len(missing) > 0 {
+			checks["store_capabilities_missing"] = strings.Join(missing, ",")
+		}
+		if total != applicable {
+			names := make([]string, 0, 2)
+			for _, exemption := range store.CapabilityExemptionsFor(profile) {
+				names = append(names, exemption.Capability+" ("+exemption.Reason+")")
+			}
+			// Stated so the smaller denominator is explained rather than looking
+			// like a capability was quietly dropped to make the number look good.
+			checks["store_capabilities_inapplicable"] = strings.Join(names, "; ")
+		}
 		if s.Cfg.CloudflareProfileReady() {
 			checks["cloudflare_profile"] = "ready"
 			checks["cloudflare_parity"] = "complete"

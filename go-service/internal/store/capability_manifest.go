@@ -139,6 +139,91 @@ func MissingCapabilities(s Store) []string {
 	return missing
 }
 
+// CapabilityExemption declares a capability that a deployment profile cannot have,
+// as opposed to one it has not implemented yet.
+//
+// The distinction matters because the coverage number is a parity signal, and a
+// permanently inapplicable capability makes that signal permanently wrong: the
+// count can never reach N/N, so an operator cannot tell "this profile is
+// complete" from "this profile is one short and always will be". Worse, the
+// number alone does not say WHICH capability, so the reader cannot work out that
+// the missing one does not apply.
+//
+// An exemption is therefore a deliberate, named claim with a reason attached, not
+// a place to hide a gap. Without a reason it would be indistinguishable from
+// quietly dropping an inconvenient entry.
+type CapabilityExemption struct {
+	Profile    string
+	Capability string
+	Reason     string
+}
+
+// capabilityExemptions lists the capabilities a profile cannot satisfy.
+//
+// There is exactly one, and it is a statement about the topology rather than a
+// deferral: ShadowStatusReporter reports how many dual writes to a shadow failed,
+// and only the MariaDB shadow store implements it. The Cloudflare profile does not
+// use MariaDB at all, so there is no shadow to report on. Counting it as missing
+// would tell a Cloudflare operator that one capability of the parity surface is
+// unimplemented, which is not true and cannot be fixed.
+var capabilityExemptions = []CapabilityExemption{
+	{
+		Profile:    "cloudflare",
+		Capability: "ShadowStatusReporter",
+		Reason:     "there is no MariaDB shadow to report dual-write failures for on this profile",
+	},
+}
+
+// CapabilityExemptionsFor returns the exemptions that apply to a profile.
+func CapabilityExemptionsFor(profile string) []CapabilityExemption {
+	out := make([]CapabilityExemption, 0, 1)
+	for _, exemption := range capabilityExemptions {
+		if exemption.Profile == profile {
+			out = append(out, exemption)
+		}
+	}
+	return out
+}
+
+// CapabilityCoverageForProfile reports coverage with the profile's inapplicable
+// capabilities removed from both the numerator and the denominator.
+//
+// It does NOT relax what "implemented" means: a capability that is applicable and
+// absent is still counted as absent. Only a declared exemption moves, and every
+// exemption carries a reason that the caller can put in front of an operator.
+func CapabilityCoverageForProfile(s Store, profile string) (implemented, applicable, total int) {
+	exempt := map[string]bool{}
+	for _, exemption := range CapabilityExemptionsFor(profile) {
+		exempt[exemption.Capability] = true
+	}
+	for _, status := range CapabilityReport(s) {
+		if exempt[status.Name] {
+			continue
+		}
+		applicable++
+		if status.Implemented {
+			implemented++
+		}
+	}
+	return implemented, applicable, len(CapabilityReport(s))
+}
+
+// MissingApplicableCapabilities returns the capabilities that are absent AND
+// applicable, which is the list an operator can act on.
+func MissingApplicableCapabilities(s Store, profile string) []string {
+	exempt := map[string]bool{}
+	for _, exemption := range CapabilityExemptionsFor(profile) {
+		exempt[exemption.Capability] = true
+	}
+	var missing []string
+	for _, name := range MissingCapabilities(s) {
+		if !exempt[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // CapabilityCoverage returns the implemented and total optional-capability counts
 // for a store. It exists so parity progress is a number that can be reported and
 // asserted instead of an impression, and so an incomplete provider cannot be
