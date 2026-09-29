@@ -114,3 +114,81 @@ func TestMutationFenceForwardsExactDocumentReadsAndBlocksWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type mutationFenceAsyncProbe struct {
+	VectorStore
+	awaitIDs        []string
+	acceleratorDocs []VectorDocument
+}
+
+func (s *mutationFenceAsyncProbe) AwaitVisible(_ context.Context, ids []string, _ time.Duration) error {
+	s.awaitIDs = append([]string(nil), ids...)
+	return nil
+}
+
+func (s *mutationFenceAsyncProbe) GetAcceleratorDocuments(_ context.Context, ids []string) ([]VectorDocument, error) {
+	return append([]VectorDocument(nil), s.acceleratorDocs...), nil
+}
+
+func TestMutationFenceForwardsAsyncVisibilityAndAcceleratorReads(t *testing.T) {
+	probe := &mutationFenceAsyncProbe{
+		VectorStore:     NewFakeVectorStore(),
+		acceleratorDocs: []VectorDocument{{ID: "accelerator-only"}},
+	}
+	wrapped := NewMutationFencedStore(probe)
+	if !HasVisibilityWaiter(wrapped) {
+		t.Fatal("mutation fence hid the delegate visibility waiter")
+	}
+	waiter, ok := wrapped.(VectorVisibilityWaiter)
+	if !ok {
+		t.Fatal("mutation fence does not forward VectorVisibilityWaiter")
+	}
+	if err := waiter.AwaitVisible(context.Background(), []string{"doc-a"}, time.Second); err != nil {
+		t.Fatalf("AwaitVisible: %v", err)
+	}
+	if len(probe.awaitIDs) != 1 || probe.awaitIDs[0] != "doc-a" {
+		t.Fatalf("forwarded visibility ids = %#v", probe.awaitIDs)
+	}
+	reader, ok := wrapped.(AcceleratorExactDocumentReader)
+	if !ok {
+		t.Fatal("mutation fence does not forward AcceleratorExactDocumentReader")
+	}
+	docs, err := reader.GetAcceleratorDocuments(context.Background(), []string{"doc-a"})
+	if err != nil {
+		t.Fatalf("GetAcceleratorDocuments: %v", err)
+	}
+	if len(docs) != 1 || docs[0].ID != "accelerator-only" {
+		t.Fatalf("accelerator documents = %#v", docs)
+	}
+}
+
+func TestMutationFenceDoesNotMarkSynchronousDelegateAsAsync(t *testing.T) {
+	wrapped := NewMutationFencedStore(NewFakeVectorStore())
+	if !HasVisibilityWaiter(wrapped) {
+		return
+	}
+	t.Fatal("mutation fence must not classify a synchronous delegate as asynchronous")
+}
+
+type mutationFenceExactOnlyProbe struct {
+	VectorStore
+}
+
+func (s *mutationFenceExactOnlyProbe) GetDocuments(_ context.Context, ids []string) ([]VectorDocument, error) {
+	return []VectorDocument{{ID: ids[0], DocumentText: "synchronous exact read"}}, nil
+}
+
+func TestMutationFenceAcceleratorReaderFallsBackForSynchronousExactStore(t *testing.T) {
+	wrapped := NewMutationFencedStore(&mutationFenceExactOnlyProbe{VectorStore: NewFakeVectorStore()})
+	reader, ok := wrapped.(AcceleratorExactDocumentReader)
+	if !ok {
+		t.Fatal("mutation fence does not expose the outbox accelerator-read surface")
+	}
+	docs, err := reader.GetAcceleratorDocuments(context.Background(), []string{"doc-a"})
+	if err != nil {
+		t.Fatalf("GetAcceleratorDocuments: %v", err)
+	}
+	if len(docs) != 1 || docs[0].ID != "doc-a" || docs[0].DocumentText != "synchronous exact read" {
+		t.Fatalf("synchronous fallback documents = %#v", docs)
+	}
+}

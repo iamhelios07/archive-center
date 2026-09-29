@@ -69,7 +69,7 @@ func (s *visibilityBlockingStore) Upsert(ctx context.Context, sessionID string, 
 		return nil
 	}
 	if err := waiter.AwaitVisible(ctx, ids, visibilityBlockingBudget(ctx)); err != nil {
-		return fmt.Errorf("%w: %v", ErrVisibilityPending, err)
+		return fmt.Errorf("%w: %w", ErrVisibilityPending, err)
 	}
 	s.rememberAccepted(docs)
 	return nil
@@ -133,6 +133,9 @@ func (s *visibilityBlockingStore) AwaitVisible(ctx context.Context, ids []string
 		return waiter.AwaitVisible(ctx, ids, budget)
 	}
 	return nil
+}
+func (s *visibilityBlockingStore) VisibilityWaiterEnabled() bool {
+	return HasVisibilityWaiter(s.delegate)
 }
 func (s *visibilityBlockingStore) QueryExact(ctx context.Context, query ExactQuery) ([]ExactQueryResult, error) {
 	if querier, ok := s.delegate.(ExactMetadataQuerier); ok {

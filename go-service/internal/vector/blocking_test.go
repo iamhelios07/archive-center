@@ -88,6 +88,9 @@ func TestVisibilityBlockingVectorStoreReturnsPendingOnVisibilityTimeout(t *testi
 	if !errors.Is(err, ErrVisibilityPending) {
 		t.Fatalf("Upsert error = %v, want ErrVisibilityPending", err)
 	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Upsert error = %v, want original context deadline cause", err)
+	}
 	if provider.upserts != 1 || len(provider.awaitIDs) != 1 {
 		t.Fatalf("upserts=%d awaits=%v, want one accepted mutation and one visibility wait", provider.upserts, provider.awaitIDs)
 	}

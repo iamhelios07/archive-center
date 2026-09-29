@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -303,6 +304,67 @@ func TestOutboxBlockingFacadeDefersVisibilityTimeoutWithoutRetryingMutation(t *t
 	}
 	if len(accelerator.upserts) != 1 || accelerator.awaitCalls != 1 {
 		t.Fatalf("upserts=%d awaits=%d, want one mutation and one blocking wait", len(accelerator.upserts), accelerator.awaitCalls)
+	}
+}
+
+// canonicalReadbackProvider models the D1 manifest being present before a
+// Vectorize replica exposes the same document. The outbox must not treat this
+// canonical row as accelerator proof after all production wrappers are applied.
+type canonicalReadbackProvider struct {
+	docs map[string]vector.VectorDocument
+}
+
+func (p canonicalReadbackProvider) ListCanonicalVectorDocuments(_ context.Context, sessionID string) ([]vector.VectorDocument, error) {
+	var out []vector.VectorDocument
+	for _, doc := range p.docs {
+		if doc.ChatSessionID == sessionID {
+			out = append(out, doc)
+		}
+	}
+	return out, nil
+}
+
+func (p canonicalReadbackProvider) GetCanonicalVectorDocuments(_ context.Context, ids []string) ([]vector.VectorDocument, error) {
+	out := make([]vector.VectorDocument, 0, len(ids))
+	for _, id := range ids {
+		if doc, ok := p.docs[id]; ok {
+			out = append(out, doc)
+		}
+	}
+	return out, nil
+}
+
+func TestOutboxFencedCanonicalVectorizeReadbackBypassesCanonicalFallback(t *testing.T) {
+	item := eventualVectorOutboxItem(t, 13, "memory:sess-v:fenced", "revision-v-fenced", "sess-v")
+	var canonicalDoc vector.VectorDocument
+	if err := json.Unmarshal([]byte(item.DocumentJSON), &canonicalDoc); err != nil {
+		t.Fatalf("unmarshal canonical document: %v", err)
+	}
+	base := &memoryVectorProcessorStore{Store: store.NewNoopStore(), items: []*store.MemoryVectorOutboxItem{item}}
+	outbox := &visibilityPendingProcessorStore{memoryVectorProcessorStore: base}
+	raw := &acknowledgedInvisibleVectorStore{
+		memoryVectorProcessorVector: &memoryVectorProcessorVector{VectorStore: vector.NewFakeVectorStore()},
+	}
+	blocking := vector.NewVisibilityBlockingVectorStore(raw)
+	canonical := vector.NewCanonicalVectorStore(blocking, canonicalReadbackProvider{docs: map[string]vector.VectorDocument{canonicalDoc.ID: canonicalDoc}})
+	server := &Server{
+		Store:         outbox,
+		Vector:        vector.NewMutationFencedStore(canonical),
+		RuntimeConfig: RuntimeConfig{Synced: true, FailedQueueMaxAttempts: 4},
+	}
+
+	result, err := server.processMemoryVectorOutboxOnce(context.Background(), "worker", time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("processMemoryVectorOutboxOnce: %v", err)
+	}
+	if result.CanonicalState != "visibility_pending" || !result.VectorApplied {
+		t.Fatalf("result = %+v, want accepted visibility_pending despite D1 canonical readback", result)
+	}
+	if len(base.failed) != 0 || len(outbox.deferredPayloads) != 1 {
+		t.Fatalf("failed=%v deferred=%d, want no retry consumption and one durable deferral", base.failed, len(outbox.deferredPayloads))
+	}
+	if len(raw.upserts) != 1 || raw.awaitCalls != 2 {
+		t.Fatalf("upserts=%d awaits=%d, want one mutation and blocking plus outbox visibility checks", len(raw.upserts), raw.awaitCalls)
 	}
 }
 

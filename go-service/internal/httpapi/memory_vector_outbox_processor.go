@@ -391,7 +391,7 @@ func (s *Server) processClaimedMemoryVectorOperation(
 			// An acknowledged asynchronous upsert is not replayed merely because
 			// Vectorize has not exposed it yet. The durable deferral below releases
 			// the lease and restores the claim attempt.
-			if waiter, ok := s.Vector.(vector.VectorVisibilityWaiter); ok {
+			if waiter, ok := s.Vector.(vector.VectorVisibilityWaiter); ok && vector.HasVisibilityWaiter(s.Vector) {
 				if err := waiter.AwaitVisible(vectorCtx, []string{item.DocumentID}, memoryVectorVisibilityBudget); err != nil {
 					if deferred, deferErr := s.deferMemoryVectorVisibility(ctx, outbox, item, document, leaseOwner, now, &result, err.Error()); deferred {
 						return result, deferErr
@@ -481,7 +481,7 @@ func (s *Server) processClaimedMemoryVectorOperation(
 // established retry path, which keeps non-Cloudflare test and legacy stores
 // behaviourally unchanged.
 func (s *Server) deferMemoryVectorVisibility(ctx context.Context, outbox store.MemoryVectorOutboxStore, item *store.MemoryVectorOutboxItem, document vector.VectorDocument, leaseOwner string, now time.Time, result *memoryVectorProcessResult, cause string) (bool, error) {
-	if _, async := s.Vector.(vector.VectorVisibilityWaiter); !async {
+	if !vector.HasVisibilityWaiter(s.Vector) {
 		return false, nil
 	}
 	pending, ok := outbox.(store.MemoryVectorVisibilityPendingStore)

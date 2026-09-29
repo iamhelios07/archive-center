@@ -226,3 +226,60 @@ actor는 요청의 label, 없으면 peer 주소이며 **Authorization 헤더에�
    남지만 재개되지는 않는다. 각 job의 재개 semantics를 설계하면 `interrupted`
    대신 이어받을 수 있다. 지금은 재개할 수 없는 것을 재개하는 척하지 않는 쪽을
    택했다.
+
+## Stage 5.1 — Vectorize visibility wrapper 보정
+
+### 단계 목적
+
+최종 mutation fence가 선택적 Go interface를 숨겨 Cloudflare outbox가
+`visibility_pending` 대신 retry를 소진하거나 D1 canonical 문서를 Vectorize
+readback으로 오인할 수 있던 S1 결함을 보정했다. 공개 `VectorStore` 메서드
+시그니처는 변경하지 않았다.
+
+### 산출물
+
+| 파일 | 변경 요약 |
+| --- | --- |
+| `go-service/internal/vector/vector.go` | 실제 비동기 delegate만 식별하는 `VisibilityWaiterCapability`와 `HasVisibilityWaiter` 추가 |
+| `go-service/internal/vector/blocking.go` | cancellation/deadline 원인을 보존하고 capability를 전달 |
+| `go-service/internal/vector/canonical.go` | accelerator exact read를 D1/accepted overlay보다 우선 |
+| `go-service/internal/vector/mutation_fence.go` | visibility·accelerator read forwarding 및 동기 exact-read fallback |
+| `go-service/internal/httpapi/memory_vector_outbox_processor.go` | durable deferral을 실제 비동기 capability로 제한 |
+| 관련 vector/httpapi tests | live wrapper composition, canonical bypass, synchronous Chroma-like fallback, deadline cause 회귀 고정 |
+
+### 본문 변경 정도 / 본문 무손실 여부
+
+코드 보정이다. 기존 public method signature와 동기 Chroma/Fake 동작은 유지했다.
+Cloudflare의 blocking write contract는 caller context에서 visibility를 기다리고,
+timeout/cancel이면 원인을 보존한 `ErrVisibilityPending`으로 반환한다.
+
+### 검증 결과
+
+실행 명령:
+
+```bash
+node --check "Archive Center.js"
+cd go-service
+go test ./... -count=1
+cd ..
+git diff --check
+```
+
+결과:
+
+- 모두 통과했다. Go 전체 패키지 테스트는 exit 0으로 완료했고 `git diff --check`도 통과했다.
+- 독립 검토 모델 `openrouter-custom/stealth/space-bunny-alpha`가 초기 forwarding 보정에서 동기 Chroma-like exact-read 회귀를 발견했다. accelerator reader의 exact fallback과 회귀 테스트를 추가한 뒤 같은 모델이 5/5 항목을 재검증하여 차단 이슈 없음을 확인했다.
+
+### 잔여 위험
+
+- Vectorize ANN search의 global read-after-write 보장은 여전히 없다. durable Search overlay는 별도 설계·승인·구현 gate로 남는다.
+- authenticated deployment 검증은 preview test와 별개이며 여전히 미실행 경계다.
+
+### 다음 단계 영향
+
+- 사용자 선택 정책인 durable Search overlay는 D1/outbox pending 문서의 filter, score, ordering, dedupe, delete masking, TTL/stability, failure/retry 및 readiness/metrics semantics를 먼저 확정한 뒤 별도 승인으로 진행한다.
+- `cloudflareParityComplete=false` 상태는 유지한다.
+
+### 승인 요청
+
+- Stage 5.1 산출물과 검증 결과를 승인하면 durable Search overlay의 설계 단계를 시작한다.

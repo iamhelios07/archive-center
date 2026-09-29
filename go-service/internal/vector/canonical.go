@@ -79,6 +79,9 @@ func (s *canonicalStore) ListDocuments(ctx context.Context, sessionID string) ([
 	return docs, nil
 }
 func (s *canonicalStore) GetAcceleratorDocuments(ctx context.Context, ids []string) ([]VectorDocument, error) {
+	if reader, ok := s.accelerator.(AcceleratorExactDocumentReader); ok {
+		return reader.GetAcceleratorDocuments(ctx, ids)
+	}
 	if reader, ok := s.accelerator.(ExactDocumentReader); ok {
 		return reader.GetDocuments(ctx, ids)
 	}
@@ -124,4 +127,7 @@ func (s *canonicalStore) AwaitVisible(ctx context.Context, ids []string, budget 
 		return waiter.AwaitVisible(ctx, ids, budget)
 	}
 	return nil
+}
+func (s *canonicalStore) VisibilityWaiterEnabled() bool {
+	return HasVisibilityWaiter(s.accelerator)
 }

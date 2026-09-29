@@ -87,6 +87,27 @@ type VectorVisibilityWaiter interface {
 	AwaitVisible(ctx context.Context, ids []string, budget time.Duration) error
 }
 
+// VisibilityWaiterCapability lets a wrapper forward VectorVisibilityWaiter
+// without falsely advertising asynchronous visibility to callers when its
+// wrapped store is synchronous. It is needed because Go optional interfaces are
+// satisfied by a wrapper's method set, not by its delegate at runtime.
+type VisibilityWaiterCapability interface {
+	VisibilityWaiterEnabled() bool
+}
+
+// HasVisibilityWaiter reports whether a store has an active asynchronous
+// visibility waiter. A direct waiter predating VisibilityWaiterCapability is
+// treated as active for compatibility.
+func HasVisibilityWaiter(store VectorStore) bool {
+	if _, ok := store.(VectorVisibilityWaiter); !ok {
+		return false
+	}
+	if capability, ok := store.(VisibilityWaiterCapability); ok {
+		return capability.VisibilityWaiterEnabled()
+	}
+	return true
+}
+
 // DocumentLister is an optional diagnostic extension for full vector integrity
 // audits. It returns stored vector metadata without changing runtime recall.
 type DocumentLister interface {

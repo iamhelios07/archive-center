@@ -3,6 +3,7 @@ package vector
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // MutationFencer serializes a multi-step integrity check with every mutation
@@ -143,6 +144,42 @@ func (s *mutationFencedStore) GetDocuments(ctx context.Context, ids []string) ([
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return reader.GetDocuments(ctx, ids)
+}
+
+// GetAcceleratorDocuments preserves an accelerator-only read through the
+// mutation fence. A delegate that has a distinct accelerator reader is used
+// directly; a synchronous exact-only delegate (such as Chroma) retains its
+// established exact-read behaviour rather than being made unsupported merely
+// by the fence's static method set.
+func (s *mutationFencedStore) GetAcceleratorDocuments(ctx context.Context, ids []string) ([]VectorDocument, error) {
+	if reader, ok := s.delegate.(AcceleratorExactDocumentReader); ok {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return reader.GetAcceleratorDocuments(ctx, ids)
+	}
+	if reader, ok := s.delegate.(ExactDocumentReader); ok {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return reader.GetDocuments(ctx, ids)
+	}
+	return nil, ErrNotEnabled
+}
+
+// AwaitVisible preserves a provider's visibility boundary through the mutation
+// fence. Synchronous delegates return immediately; VisibilityWaiterEnabled
+// distinguishes them from an actual asynchronous provider.
+func (s *mutationFencedStore) AwaitVisible(ctx context.Context, ids []string, budget time.Duration) error {
+	waiter, ok := s.delegate.(VectorVisibilityWaiter)
+	if !ok {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return waiter.AwaitVisible(ctx, ids, budget)
+}
+
+func (s *mutationFencedStore) VisibilityWaiterEnabled() bool {
+	return HasVisibilityWaiter(s.delegate)
 }
 
 func (s *mutationFencedStore) QueryExact(ctx context.Context, query ExactQuery) ([]ExactQueryResult, error) {
