@@ -107,6 +107,57 @@ Dockerfile is a token in a layer that gets pushed, cached and pulled.
 Create the D1 database and the Vectorize index, and note their identifiers. These
 are account-scoped and the repository deliberately does not carry them.
 
+**The Vectorize index dimension is not a constant of Archive Center.** It is
+determined by the embedding model configured for memory indexing, and that model
+is a *user setting*, not a deployment property:
+
+> RisuAI → settings → 기억 색인 LLM (Embedding)
+
+Different users choose different models, so **different deployments need
+different index dimensions.** There is no default this repository can declare on
+your behalf, which is why `wrangler.template.toml` carries the index *name* and
+nothing about its shape.
+
+```bash
+npx wrangler vectorize create archive-center-vectors --dimensions=<N> --metric=cosine
+```
+
+`<N>` must match the model the operator's own local runtime uses. Common values
+are 1536 for OpenAI `text-embedding-3-small`, 3072 for `text-embedding-3-large`,
+768 for Workers AI `@cf/baai/bge-base-en-v1.5` and 1024 for `@cf/baai/bge-m3` —
+but treat those as examples, not as a lookup table. Confirm against the data.
+
+**Where to read the actual value.** Not from `.env`: `AC_EMBEDDER_MODEL` is
+declarative metadata for preflight and reporting, and it can disagree with what
+is stored. The authoritative source is what was actually embedded:
+
+```sql
+-- against the local MariaDB
+SELECT embedding_model, JSON_LENGTH(embedding) AS dim, COUNT(*)
+FROM memories
+WHERE embedding IS NOT NULL AND embedding <> ''
+GROUP BY embedding_model, dim;
+```
+
+The local ChromaDB collection cannot answer this for you. Chroma does not embed
+anything: the Host computes the vectors and the Go backend stores them in both
+MariaDB and Chroma. Locally the dimension is never declared in advance — Chroma
+takes it from the first upsert and rejects a later mismatch, and the backend only
+translates that rejection. Vectorize is the opposite: it cannot infer the
+dimension from a first write, so it must exist with the right width before
+anything is stored.
+
+Getting it wrong is refused rather than silently truncated:
+
+```
+vectorize index dimension mismatch: the index holds one embedding dimension;
+re-embed every document with one model or recreate the index
+```
+
+To change the model later, re-create the index at the new width and reindex. The
+canonical rows in D1 are the source and Vectorize is rebuildable, so nothing is
+lost — but the two must not disagree about the width in the meantime.
+
 ### 2. Apply the schema
 
 ```bash
@@ -121,6 +172,7 @@ Migrations are numbered and applied in order:
 | `001_canonical_schema.sql` | Generated from the MariaDB migrations. Do not edit by hand; re-run `go run ./cmd/d1-schema-gen`. |
 | `002_reset_control_plane.sql` | The durable, resumable reset: lease, epoch, runs. |
 | `003_turn_preparation_settings.sql` | User settings that the local runtime keeps in files. |
+| `004_admin_jobs.sql` | Operator job snapshots, and the interrupted state an inherited job gets. |
 
 ### 3. Render the deploy config
 
@@ -237,9 +289,19 @@ What differs, deliberately:
 | Vector engine | ChromaDB | Vectorize |
 | Concurrency | `FOR UPDATE`, transactions | D1 batching, one bounded modification |
 | Vector repair | atomic index swap with a resumable journal | reindex; an atomic swap is not available |
+| **Embedding dimension** | **implicit** — Chroma takes it from the first upsert | **declared** — fixed when the index is created |
 | Settings | files beside the data directory | D1 |
 | Admin jobs (non-reset) | process memory | process memory |
 | Exposure | loopback or a LAN you choose | the public internet |
+
+The embedding dimension row is the one that costs time if it is missed, and it is
+a consequence of the engines rather than of this project. Neither engine embeds
+anything: the Host computes the vectors and the backend stores them. Chroma then
+accepts whatever width arrives first and rejects a later mismatch, so on the local
+runtime nobody has ever had to know the number. Vectorize cannot do that — an
+index exists at one width and must be created at the width your embedding model
+produces. Because the model is a per-user setting, that width differs between
+installations and no constant here can be right for all of them.
 
 The Vectorize difference is not a gap to be closed later. Vectorize's entire
 surface is `upsert`/`insert`/`deleteByIds`/`getByIds`/`query`/`queryById`/

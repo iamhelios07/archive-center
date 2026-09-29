@@ -25,3 +25,14 @@ database_name = "archive-center-db"
 binding = "VECTORIZE"
 index_name = "archive-center-vectors"
 # Vectorize index IDs are account-specific and must be rendered at deploy time.
+#
+# The index DIMENSION is not set here and cannot be: it is fixed when the index is
+# created, and it is determined by the embedding model the operator's local
+# runtime uses for memory indexing. That model is a per-user setting, so two
+# deployments of this project routinely need different dimensions and there is no
+# default this template could carry.
+#
+# Create the index with the matching width before deploying:
+#   npx wrangler vectorize create archive-center-vectors --dimensions=<N> --metric=cosine
+# See README.md, "Provision the account-scoped resources", for how to determine
+# <N> from data rather than from the declarative AC_EMBEDDER_MODEL.
