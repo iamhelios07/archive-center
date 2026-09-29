@@ -16,6 +16,30 @@ type CanonicalDocumentProvider interface {
 	GetCanonicalVectorDocuments(context.Context, []string) ([]VectorDocument, error)
 }
 
+// DurableSearchOverlayProvider exposes the small, durable delta that may not
+// yet be represented by an eventually consistent search accelerator. It is an
+// internal composition capability: VectorStore.Search keeps its public
+// signature and callers never need to know whether an overlay is present.
+//
+// A returned snapshot is usable only when Truncated is false. Providers must
+// return current visibility-pending upserts and canonical delete masks from one
+// logical snapshot, so an old accelerator hit cannot outlive a newer tombstone.
+type DurableSearchOverlayProvider interface {
+	DurableSearchOverlay(context.Context, string, int) (DurableSearchOverlaySnapshot, error)
+}
+
+// DurableSearchOverlaySnapshot is the D1-owned delta to merge with accelerator
+// search results. PendingCount is the total number of pending upserts, not just
+// the portion returned under the requested bound. OldestPendingAt is zero when
+// no pending upsert exists.
+type DurableSearchOverlaySnapshot struct {
+	Upserts         []VectorDocument
+	TombstoneIDs    []string
+	PendingCount    int
+	OldestPendingAt time.Time
+	Truncated       bool
+}
+
 // canonicalStore keeps the public VectorStore contract unchanged while using
 // canonical storage for exact lifecycle reads. Similarity search remains the
 // accelerator's responsibility.
