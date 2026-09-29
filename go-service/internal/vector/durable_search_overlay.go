@@ -28,6 +28,10 @@ func NewDurableSearchOverlayVectorStore(accelerator VectorStore, overlay Durable
 	return &durableSearchOverlayStore{accelerator: accelerator, overlay: overlay}
 }
 
+func (s *durableSearchOverlayStore) DurableSearchOverlay(ctx context.Context, sessionID string, maximum int) (DurableSearchOverlaySnapshot, error) {
+	return s.overlay.DurableSearchOverlay(ctx, sessionID, maximum)
+}
+
 func (s *durableSearchOverlayStore) Search(ctx context.Context, sessionID string, embedding []float32, limit int, filter string) ([]VectorDocument, error) {
 	acceleratorDocs, err := s.accelerator.Search(ctx, sessionID, embedding, limit, filter)
 	if err != nil && err != ErrNotFound {

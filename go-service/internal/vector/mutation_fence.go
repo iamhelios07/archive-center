@@ -53,6 +53,19 @@ func (s *mutationFencedStore) Search(ctx context.Context, sessionID string, embe
 	return s.delegate.Search(ctx, sessionID, embedding, limit, filter)
 }
 
+// DurableSearchOverlay preserves the D1 visibility snapshot capability through
+// the process-wide fence so readiness and trace observers see the same snapshot
+// source as the wrapped Search path.
+func (s *mutationFencedStore) DurableSearchOverlay(ctx context.Context, sessionID string, maximum int) (DurableSearchOverlaySnapshot, error) {
+	provider, ok := s.delegate.(DurableSearchOverlayProvider)
+	if !ok {
+		return DurableSearchOverlaySnapshot{}, ErrNotEnabled
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return provider.DurableSearchOverlay(ctx, sessionID, maximum)
+}
+
 func (s *mutationFencedStore) Upsert(ctx context.Context, sessionID string, docs []VectorDocument) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

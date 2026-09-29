@@ -191,7 +191,11 @@ func NewServer(cfg config.Config) *Server {
 			// lifecycle reads retain the established VectorStore signatures while
 			// similarity search remains on the accelerator.
 			if canonical, ok := st.(store.CanonicalVectorDocumentStore); ok {
-				vs = vector.NewCanonicalVectorStore(blockingProvider, canonical)
+				canonicalProvider := vector.NewCanonicalVectorStore(blockingProvider, canonical)
+				// Search stays accelerator-led, but D1's bounded visibility delta
+				// corrects only the short replica-lag window. The wrapper is Cloudflare
+				// composition only: a local Chroma store never receives this provider.
+				vs = vector.NewDurableSearchOverlayVectorStore(canonicalProvider, canonical)
 			} else {
 				vs = blockingProvider
 			}

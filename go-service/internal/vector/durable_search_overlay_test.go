@@ -23,6 +23,15 @@ type durableOverlayTestProvider struct {
 	maximum  int
 }
 
+type durableOverlayCanonicalProvider struct{ *durableOverlayTestProvider }
+
+func (*durableOverlayCanonicalProvider) ListCanonicalVectorDocuments(context.Context, string) ([]VectorDocument, error) {
+	return nil, nil
+}
+func (*durableOverlayCanonicalProvider) GetCanonicalVectorDocuments(context.Context, []string) ([]VectorDocument, error) {
+	return nil, nil
+}
+
 func (p *durableOverlayTestProvider) DurableSearchOverlay(_ context.Context, sessionID string, maximum int) (DurableSearchOverlaySnapshot, error) {
 	p.session = sessionID
 	p.maximum = maximum
@@ -121,5 +130,30 @@ func TestDurableSearchOverlayLeavesStoresWithoutProviderUnchanged(t *testing.T) 
 	accelerator := NewFakeVectorStore()
 	if got := NewDurableSearchOverlayVectorStore(accelerator, nil); got != accelerator {
 		t.Fatalf("store = %T, want original accelerator", got)
+	}
+}
+
+func TestDurableSearchOverlayCloudflareCompositionSurvivesMutationFence(t *testing.T) {
+	accelerator := &durableOverlayTestAccelerator{VectorStore: NewFakeVectorStore(), err: ErrNotFound}
+	overlay := &durableOverlayTestProvider{snapshot: DurableSearchOverlaySnapshot{Upserts: []VectorDocument{{
+		ID: "pending", ChatSessionID: "session", Embedding: []float32{1},
+	}}}}
+	canonical := &durableOverlayCanonicalProvider{durableOverlayTestProvider: overlay}
+
+	// This is the Cloudflare chain: Vectorize/blocking -> canonical D1 ->
+	// durable search overlay -> process mutation fence.
+	stack := NewMutationFencedStore(NewDurableSearchOverlayVectorStore(
+		NewCanonicalVectorStore(accelerator, canonical), canonical,
+	))
+	docs, err := stack.Search(context.Background(), "session", []float32{1}, 5, "")
+	if err != nil || len(docs) != 1 || docs[0].ID != "pending" {
+		t.Fatalf("Search docs=%#v err=%v, want durable pending result", docs, err)
+	}
+	provider, ok := stack.(DurableSearchOverlayProvider)
+	if !ok {
+		t.Fatalf("stack %T does not preserve DurableSearchOverlayProvider", stack)
+	}
+	if _, err := provider.DurableSearchOverlay(context.Background(), "session", 5); err != nil {
+		t.Fatalf("DurableSearchOverlay: %v", err)
 	}
 }
