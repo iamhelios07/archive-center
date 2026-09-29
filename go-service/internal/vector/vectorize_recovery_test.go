@@ -71,12 +71,11 @@ func TestVectorizeStartupRecoveryReadsBackEveryRecoveredBatch(t *testing.T) {
 	}
 	// A snapshot that only partly landed must read back short, never as a
 	// complete batch.
-	listed, err := any(store).(DocumentLister).ListDocuments(ctx, "sess-1")
-	if err != nil {
-		t.Fatalf("ListDocuments: %v", err)
-	}
-	if len(listed) != total {
-		t.Fatalf("enumeration = %d documents, want %d", len(listed), total)
+	// Vectorize has no cursor and a full metadata query is capped at 50. A
+	// Cloudflare composition uses D1 for this canonical manifest; the raw
+	// provider must reject this diagnostic rather than report a partial list.
+	if _, err := any(store).(DocumentLister).ListDocuments(ctx, "sess-1"); err == nil {
+		t.Fatal("ListDocuments must reject a full Vectorize diagnostic page")
 	}
 	index.put("memory:sess-1:short", []float32{0, 0, 1}, map[string]any{
 		vectorizeDocumentIDKey: "memory:sess-1:short",

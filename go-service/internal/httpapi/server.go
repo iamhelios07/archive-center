@@ -183,6 +183,18 @@ func NewServer(cfg config.Config) *Server {
 			vectorErr = err
 			referenceVectorErr = err
 		} else {
+			// Vectorize applies mutations asynchronously. Keep that detail behind a
+			// context-bound blocking facade so a successful VectorStore.Upsert has
+			// the same observable visibility boundary as the ChromaDB contract.
+			blockingProvider := vector.NewVisibilityBlockingVectorStore(provider)
+			// D1 owns the canonical document manifest. Compose it with Vectorize so
+			// lifecycle reads retain the established VectorStore signatures while
+			// similarity search remains on the accelerator.
+			if canonical, ok := st.(store.CanonicalVectorDocumentStore); ok {
+				vs = vector.NewCanonicalVectorStore(blockingProvider, canonical)
+			} else {
+				vs = blockingProvider
+			}
 			// One Vectorize index holds both document families, so the two stores
 			// must stay separable. The discriminator is the document tier, not a
 			// second index: session documents are addressed by chat_session_id and
@@ -190,8 +202,7 @@ func NewServer(cfg config.Config) *Server {
 			// audience queries the other key. A reference document that acquired a
 			// chat_session_id would leak into a session recall, so the separation
 			// has to be asserted rather than assumed.
-			vs = provider
-			referenceVS = provider
+			referenceVS = blockingProvider
 		}
 	case cfg.ChromaEnabled && strings.TrimSpace(cfg.ChromaEndpoint) != "":
 		vs, vectorErr = vector.NewChromaStore(cfg.ChromaEndpoint, cfg.ChromaCollection, cfg.ChromaAPIPath)

@@ -410,6 +410,12 @@ export async function runVectorQuery(port: VectorizePort, payload: unknown): Pro
     request.includeValues === undefined || request.includeValues === null
       ? false
       : requireBoolean(request.includeValues, "vector.query includeValues");
+  // Full metadata is required by the established Go result contract. Vectorize
+  // limits that payload shape to 50 results; callers that need a wider,
+  // deliberately lossy diagnostic must ask for a separate shallow protocol.
+  if (topK > 50) {
+    throw new VectorRequestError("vector.query full metadata is limited to topK <= 50");
+  }
   const options: VectorizeQueryOptions = {
     topK,
     // Full metadata, not the indexed level: the Go side builds tier, source

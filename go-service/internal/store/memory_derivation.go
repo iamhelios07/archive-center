@@ -252,6 +252,16 @@ type MemoryVectorOutboxLaneStore interface {
 	ClaimMemoryVectorOperationsByOperation(ctx context.Context, leaseOwner string, now time.Time, leaseDuration time.Duration, operation string) ([]*MemoryVectorOutboxItem, error)
 }
 
+// MemoryVectorVisibilityPendingStore durably records that Vectorize accepted an
+// upsert but has not made it readable yet. It releases the lease and restores
+// the consumed claim attempt so propagation delay is never mistaken for an
+// execution failure.
+type MemoryVectorVisibilityPendingStore interface {
+	DeferMemoryVectorVisibility(context.Context, int64, string, time.Time, time.Time, string) error
+}
+
+const MemoryVectorVisibilityPendingMarker = "vector_visibility_pending"
+
 // MemoryVectorMaterialization is the verified public memory vector that must
 // converge into MariaDB before its outbox operation can be completed.
 type MemoryVectorMaterialization struct {

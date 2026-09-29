@@ -9,8 +9,9 @@ import (
 
 // Common errors.
 var (
-	ErrNotFound   = errors.New("no vector results found")
-	ErrNotEnabled = errors.New("vector store is not enabled")
+	ErrNotFound          = errors.New("no vector results found")
+	ErrNotEnabled        = errors.New("vector store is not enabled")
+	ErrVisibilityPending = errors.New("vector mutation accepted but is not visible before the context deadline")
 )
 
 // VectorStore defines the core vector search and management contract.
@@ -50,6 +51,12 @@ type DocumentDeleter interface {
 // use it to verify provider-applied writes without listing a full collection.
 type ExactDocumentReader interface {
 	GetDocuments(ctx context.Context, ids []string) ([]VectorDocument, error)
+}
+
+// AcceleratorExactDocumentReader bypasses a canonical fallback when a worker
+// must prove the retrieval accelerator itself has become visible.
+type AcceleratorExactDocumentReader interface {
+	GetAcceleratorDocuments(ctx context.Context, ids []string) ([]VectorDocument, error)
 }
 
 // VectorVisibilityWaiter is an optional extension for stores whose writes

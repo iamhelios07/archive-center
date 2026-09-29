@@ -171,6 +171,15 @@ describe("vector request validation, decided without a binding", () => {
     }
   });
 
+  it("rejects full-metadata queries above Vectorize's documented limit before calling the binding", async () => {
+    const failure = await runVectorQuery(undefined as never, {
+      vector: [1, 0],
+      topK: 51,
+      includeValues: false,
+    }).catch((error: unknown) => error as Error);
+    expect(String((failure as Error).message)).toMatch(/topK <= 50/);
+  });
+
   it("reports an absent vectorize binding as a health report, not an error", async () => {
     const health = await runVectorHealth(undefined);
     expect(health).toEqual({ bound: false });

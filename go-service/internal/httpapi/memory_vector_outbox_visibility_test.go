@@ -201,6 +201,111 @@ func TestOutboxUpsertWithoutAVisibilityWaiterIsUnchanged(t *testing.T) {
 // consequence the waiter exists to prevent, so the fix is known to be load
 // bearing rather than cosmetic: a store that never becomes visible drives the
 // outbox to its attempt limit and then parks permanently.
+// visibilityPendingProcessorStore opts a test outbox into the durable pending
+// capability. Keeping it separate from memoryVectorProcessorStore preserves the
+// legacy-path tests above, which intentionally assert the old retry behaviour.
+type visibilityPendingProcessorStore struct {
+	*memoryVectorProcessorStore
+	deferredPayloads []string
+}
+
+func (s *visibilityPendingProcessorStore) DeferMemoryVectorVisibility(_ context.Context, _ int64, _ string, _ time.Time, _ time.Time, documentJSON string) error {
+	s.deferredPayloads = append(s.deferredPayloads, documentJSON)
+	return nil
+}
+
+// acknowledgedInvisibleVectorStore models the Vectorize observation from Gate
+// 2: the mutation and visibility probe succeed, yet the immediately following
+// exact read remains empty. The processor must persist that as visibility-pending
+// instead of re-upserting it or consuming a retry attempt.
+type acknowledgedInvisibleVectorStore struct {
+	*memoryVectorProcessorVector
+	awaitCalls int
+	awaitErr   error
+}
+
+func (s *acknowledgedInvisibleVectorStore) AwaitVisible(context.Context, []string, time.Duration) error {
+	s.awaitCalls++
+	return s.awaitErr
+}
+
+func (s *acknowledgedInvisibleVectorStore) GetDocuments(context.Context, []string) ([]vector.VectorDocument, error) {
+	return nil, nil
+}
+
+func TestOutboxUpsertDefersAcknowledgedButUnreadableVectorizeWrite(t *testing.T) {
+	item := eventualVectorOutboxItem(t, 11, "memory:sess-v:pending", "revision-v-pending", "sess-v")
+	base := &memoryVectorProcessorStore{Store: store.NewNoopStore(), items: []*store.MemoryVectorOutboxItem{item}}
+	outbox := &visibilityPendingProcessorStore{memoryVectorProcessorStore: base}
+	accelerator := &acknowledgedInvisibleVectorStore{
+		memoryVectorProcessorVector: &memoryVectorProcessorVector{VectorStore: vector.NewFakeVectorStore()},
+	}
+	server := &Server{Store: outbox, Vector: accelerator, RuntimeConfig: RuntimeConfig{Synced: true, FailedQueueMaxAttempts: 4}}
+
+	result, err := server.processMemoryVectorOutboxOnce(context.Background(), "worker", time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("processMemoryVectorOutboxOnce: %v", err)
+	}
+	if result.CanonicalState != "visibility_pending" || !result.VectorApplied {
+		t.Fatalf("result = %+v, want accepted visibility_pending state", result)
+	}
+	if len(base.failed) != 0 {
+		t.Fatalf("visibility pending called FailMemoryVectorOperation for %v", base.failed)
+	}
+	if len(outbox.deferredPayloads) != 1 {
+		t.Fatalf("deferred payloads = %d, want 1", len(outbox.deferredPayloads))
+	}
+	if len(accelerator.upserts) != 1 || accelerator.awaitCalls != 1 {
+		t.Fatalf("upserts=%d awaits=%d, want one accepted write and one probe", len(accelerator.upserts), accelerator.awaitCalls)
+	}
+
+	// A later lease retains the marker. It must probe visibility only: replaying
+	// the same mutation would compound Vectorize's propagation window.
+	retry := *item
+	retry.Status = "retryable"
+	retry.LastError = store.MemoryVectorVisibilityPendingMarker
+	outbox.items = []*store.MemoryVectorOutboxItem{&retry}
+	result, err = server.processMemoryVectorOutboxOnce(context.Background(), "worker", time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("second processMemoryVectorOutboxOnce: %v", err)
+	}
+	if result.CanonicalState != "visibility_pending" {
+		t.Fatalf("second result state = %q, want visibility_pending", result.CanonicalState)
+	}
+	if len(accelerator.upserts) != 1 {
+		t.Fatalf("visibility-pending lease replayed Upsert %d times, want 1", len(accelerator.upserts))
+	}
+}
+
+func TestOutboxBlockingFacadeDefersVisibilityTimeoutWithoutRetryingMutation(t *testing.T) {
+	item := eventualVectorOutboxItem(t, 12, "memory:sess-v:blocking", "revision-v-blocking", "sess-v")
+	base := &memoryVectorProcessorStore{Store: store.NewNoopStore(), items: []*store.MemoryVectorOutboxItem{item}}
+	outbox := &visibilityPendingProcessorStore{memoryVectorProcessorStore: base}
+	accelerator := &acknowledgedInvisibleVectorStore{
+		memoryVectorProcessorVector: &memoryVectorProcessorVector{VectorStore: vector.NewFakeVectorStore()},
+		awaitErr:                    context.DeadlineExceeded,
+	}
+	server := &Server{
+		Store:         outbox,
+		Vector:        vector.NewVisibilityBlockingVectorStore(accelerator),
+		RuntimeConfig: RuntimeConfig{Synced: true, FailedQueueMaxAttempts: 4},
+	}
+
+	result, err := server.processMemoryVectorOutboxOnce(context.Background(), "worker", time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatalf("processMemoryVectorOutboxOnce: %v", err)
+	}
+	if result.CanonicalState != "visibility_pending" || !result.VectorApplied {
+		t.Fatalf("result = %+v, want accepted visibility_pending state", result)
+	}
+	if len(base.failed) != 0 || len(outbox.deferredPayloads) != 1 {
+		t.Fatalf("failed=%v deferred=%d, want no retry consumption and one durable deferral", base.failed, len(outbox.deferredPayloads))
+	}
+	if len(accelerator.upserts) != 1 || accelerator.awaitCalls != 1 {
+		t.Fatalf("upserts=%d awaits=%d, want one mutation and one blocking wait", len(accelerator.upserts), accelerator.awaitCalls)
+	}
+}
+
 func TestOutboxUpsertRepeatedVisibilityFailureConsumesAttemptsAndParks(t *testing.T) {
 	neverVisible := &neverVisibleVectorStore{VectorStore: vector.NewFakeVectorStore()}
 	document := verifiedMemoryVectorProcessorDocument(vector.VectorDocument{

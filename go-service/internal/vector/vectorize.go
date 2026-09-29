@@ -98,10 +98,12 @@ const (
 	// inside the payload and argument limits Vectorize imposes.
 	vectorizeQueryPageSize = 100
 
-	// vectorizeListMaxDocuments caps one enumeration. Vectorize has no
-	// collection count and no scroll cursor in this contract, so an enumeration
-	// is an increasing-topK query. Rather than report a partial count as a real
-	// one, the sweep fails loudly when the cap is reached with a full page.
+	// Vectorize rejects a full metadata/value query above 50. It also has no
+	// cursor, so a full page at this ceiling is explicitly reported as an
+	// incomplete diagnostic rather than fabricated as a canonical listing.
+	vectorizeFullQueryMaxTopK = 50
+	// Retained for package-level compatibility with historical diagnostic tests;
+	// it is no longer an enumeration cap.
 	vectorizeListMaxDocuments = 10000
 
 	// vectorizeReadConcurrency bounds the parallel per-document reads an
@@ -199,8 +201,21 @@ type vectorizeHealthResult struct {
 	// VectorCount is the index-wide document count. MariaDB remains canonical for
 	// per-session counts, but an index-wide figure is useful for spotting an index
 	// that has drifted from canonical truth.
-	VectorCount           int    `json:"vectorCount,omitempty"`
-	ProcessedUpToMutation uint64 `json:"processedUpToMutation,omitempty"`
+	VectorCount int `json:"vectorCount,omitempty"`
+	// ProcessedUpToMutation is the index's opaque mutation marker, NOT a count.
+	//
+	// Vectorize answers with a mutation changeset identifier — a UUID string such
+	// as "98b98188-19de-42b2-94d4-1969fa0b7cd6" — and this field was typed as
+	// uint64 on the assumption that it was a monotonic watermark. Nothing read the
+	// value, so the type looked harmless; what it actually did was make the decode
+	// fail, which failed Health, which fails the startup preflight, which stops a
+	// real deployment from starting at all.
+	//
+	// The assumption survived until now because Vectorize is a remote-only binding
+	// with no local simulator: every local test decoded a stub that happened to use
+	// a number. It is a string because the wire says it is, and nothing here may
+	// depend on its shape — it exists to be reported, not interpreted.
+	ProcessedUpToMutation string `json:"processedUpToMutation,omitempty"`
 	// GeometryError is set when the binding is present but describe() failed. The
 	// health report stays useful: a bound-but-unreadable index is still worth
 	// reporting, just without geometry.
@@ -276,6 +291,9 @@ func (s *vectorizeStore) Search(ctx context.Context, sessionID string, vector []
 	if limit <= 0 {
 		limit = 5
 	}
+	if limit > vectorizeFullQueryMaxTopK {
+		return nil, fmt.Errorf("vectorize store: recall limit %d exceeds the %d-result full-metadata limit", limit, vectorizeFullQueryMaxTopK)
+	}
 	matches, err := s.queryMatches(ctx, vectorizeQueryPayload{
 		Vector: vector,
 		TopK:   limit,
@@ -337,6 +355,9 @@ func (s *vectorizeStore) QueryExact(ctx context.Context, query ExactQuery) ([]Ex
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 5
+	}
+	if limit > vectorizeFullQueryMaxTopK {
+		return nil, fmt.Errorf("vectorize store: exact query limit %d exceeds the %d-result full-metadata limit", limit, vectorizeFullQueryMaxTopK)
 	}
 	filter, err := vectorizeExactFilter(query.Where)
 	if err != nil {
@@ -532,15 +553,10 @@ func (s *vectorizeStore) GetDocuments(ctx context.Context, ids []string) ([]Vect
 	return out, nil
 }
 
-// ListDocuments enumerates one session, or the whole index when sessionID is
-// empty, with Embedding populated for every document.
-//
-// The sweep raises topK until the index answers with a short page, which is
-// also how the enumeration knows it is complete: a short page means fewer
-// documents match the filter than were requested. Results are deduplicated and
-// ordered by id so two audits of the same session render identically, and no
-// similarity is reported: the ranking that produced this order came from the
-// dimension probe vector and carries no meaning.
+// ListDocuments is a bounded Vectorize diagnostic. Vectorize ANN queries do
+// not provide cursor or full-scan semantics, so Cloudflare lifecycle callers
+// use the D1-backed adapter; this raw provider refuses to mistake a full page
+// for a complete canonical manifest.
 func (s *vectorizeStore) ListDocuments(ctx context.Context, sessionID string) ([]VectorDocument, error) {
 	probe, err := s.queryProbe(ctx)
 	if err != nil {
@@ -550,32 +566,21 @@ func (s *vectorizeStore) ListDocuments(ctx context.Context, sessionID string) ([
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
 		filter = map[string]any{"chat_session_id": sessionID}
 	}
-	out := []VectorDocument{}
-	seen := map[string]bool{}
-	for topK := vectorizeQueryPageSize; topK <= vectorizeListMaxDocuments; topK += vectorizeQueryPageSize {
-		matches, err := s.queryMatches(ctx, vectorizeQueryPayload{
-			Vector:        probe,
-			TopK:          topK,
-			Filter:        filter,
-			IncludeValues: true,
-		})
-		if err != nil {
-			return nil, err
-		}
-		for _, match := range matches {
-			id := strings.TrimSpace(match.ID)
-			if id == "" || seen[id] {
-				continue
-			}
-			seen[id] = true
+	matches, err := s.queryMatches(ctx, vectorizeQueryPayload{Vector: probe, TopK: vectorizeFullQueryMaxTopK, Filter: filter, IncludeValues: true})
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) >= vectorizeFullQueryMaxTopK {
+		return nil, fmt.Errorf("vectorize store: enumeration cap reached at the %d-result full-metadata Vectorize limit; use the canonical document manifest", vectorizeFullQueryMaxTopK)
+	}
+	out := make([]VectorDocument, 0, len(matches))
+	for _, match := range matches {
+		if strings.TrimSpace(match.ID) != "" {
 			out = append(out, s.documentFromMatch(match))
 		}
-		if len(matches) < topK {
-			sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-			return out, nil
-		}
 	}
-	return nil, fmt.Errorf("vectorize store: enumeration stopped at the %d document cap with a full page still returned; this session may hold more documents than one bridge contract can list", vectorizeListMaxDocuments)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 
 // Rebuild cannot be offered on this transport.

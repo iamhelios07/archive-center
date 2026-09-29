@@ -5,8 +5,9 @@
 Stage 5 산출물을 모두 구현하고 검증했다. 이 단계에서 계획에 없던 결함 세 개가
 발견되었고, 셋 다 테스트나 이미지 구동으로만 잡을 수 있었다.
 
-계획서가 "성공을 주장하지 않는다"고 한 미실행 경계는 그대로 남는다. Cloudflare
-계정이 없어 인증된 원격 통합 테스트는 실행하지 않았다.
+계획서가 "성공을 주장하지 않는다"고 한 미실행 경계는 그대로 남는다. 다만 후속
+원격 preview 검증에서 실제 D1·Vectorize binding을 통한 blocking write/readback 한 건을
+확인했다. 이는 deploy가 아니며, 전체 product parity 완료 선언의 근거도 아니다.
 
 ## 무엇을 만들었나
 
@@ -139,18 +140,26 @@ mandatory integrity 레벨을 갖고, 그 안의 `workerd.exe`는 Low 프로세�
 `ON CONFLICT` upsert와 복합 키를 포함한 스키마 전체를 적재해 400건 이상의
 테스트를 돌린다.
 
+## 후속 원격 Vectorize 검증과 동기 facade
+
+원격 preview Worker를 실제 Vectorize binding으로 기동해 `TestCloudflareVectorizeRemoteBlockingFacade`를 실행했다. 성공한 `Upsert`는 caller context 안에서 `AwaitVisible`을 끝낸 뒤 반환하고, 즉시 이어진 exact readback도 확인했다.
+
+그 과정에서 Vectorize의 exact read가 관측 직후 다시 빈 결과를 줄 수 있음을 확인했다. 따라서 facade는 visibility를 관측한 최신 문서를 ordinary exact read에만 overlay한다. D1 canonical adapter가 있는 product path는 D1을 우선하므로 이 overlay는 replica regression을 가리는 마지막 caller-facing fence다. outbox의 `AcceleratorExactDocumentReader`는 overlay를 우회해 실제 Vectorize readback만 검사하며, timeout/cancel은 `ErrVisibilityPending`으로 durable `visibility_pending` 상태에 기록되어 mutation을 재전송하지 않는다.
+
+ANN search의 전역 read-after-write 보장은 Vectorize가 제공하지 않는다. Cloudflare profile은 여전히 `cloudflareParityComplete=false`이며, search parity의 운영 판단은 별도 gate다.
+
 ## 미실행 경계
 
-Cloudflare 계정, account id, API token, D1 database id, Vectorize index id,
-배포된 Worker가 없다. 따라서:
+배포된 Worker는 없고, preview는 배포를 대체하지 않는다. 따라서:
 
-- **인증된 원격 통합 테스트를 실행하지 않았다.**
+- **원격 검증은 blocking write/exact readback 한 gate에 한정됐다.** 전체
+  D1 outbox/recovery 및 search workload는 아직 인증된 deployment 검증 대상이다.
 - **Cloudflare가 이 이미지를 실제로 기동하는지 검증하지 않았다.** 로컬에서
   뜨고 설정된 프로파일을 정직하게 보고한다는 것까지만 확인했다. 이건 첫
   인증 배포에서 발견되는 종류의 간극이다.
-- **Vectorize 실바인딩 동작을 검증하지 않았다.** 로컬 시뮬레이터가 없다
-  (`vectorize: "remote"`). outbox의 재시도/영구 park 판정을 좌우하는 Vectorize의
-  실제 오류 형태는 원격 하네스의 몫이다.
+- **Vectorize의 ANN search read-after-write를 검증하거나 보장하지 않았다.**
+  `getByIds` visibility와 ANN index propagation은 같은 계약이 아니며, outbox의
+  실제 오류 형태도 추가 원격 하네스가 필요하다.
 
 `cloudflareParityComplete`는 여전히 `false`이고, 따라서
 `CloudflareProfileReady()`도 false다. Cloudflare 프로파일은 **아직 기능 parity를

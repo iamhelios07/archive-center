@@ -1071,8 +1071,8 @@ func TestVectorizeCountIsExactAtTheEnumerationCap(t *testing.T) {
 		want      int
 		wantErr   bool
 	}{
-		{vectorizeListMaxDocuments - 1, vectorizeListMaxDocuments - 1, false},
-		{vectorizeListMaxDocuments, 0, true},
+		{vectorizeFullQueryMaxTopK - 1, vectorizeFullQueryMaxTopK - 1, false},
+		{vectorizeFullQueryMaxTopK, 0, true},
 	} {
 		store := newVectorizeWorkerStub(t, vectorizePagedResponder(tc.documents)).store(t)
 		if err := store.Upsert(context.Background(), "sess-1", []VectorDocument{{

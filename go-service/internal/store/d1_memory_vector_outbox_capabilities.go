@@ -633,6 +633,31 @@ func (s *d1Store) CompleteMemoryVectorOperation(
 	return s.d1OutboxFinish(ctx, outboxID, leaseOwner, now, time.Time{}, false, false, "")
 }
 
+// DeferMemoryVectorVisibility releases an acknowledged upsert while Vectorize
+// propagates it. retryable plus the explicit marker is a durable pending state
+// that fits the existing v1 schema; attempts is restored because no provider
+// operation failed.
+func (s *d1Store) DeferMemoryVectorVisibility(ctx context.Context, outboxID int64, leaseOwner string, now, retryAfter time.Time, documentJSON string) error {
+	now = nonZeroTime(now)
+	if retryAfter.Before(now) {
+		retryAfter = now
+	}
+	affected, err := s.conn.Exec(ctx, `
+		UPDATE memory_vector_outbox
+		SET status = 'retryable', attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+		    document_json = CASE WHEN ? <> '' THEN ? ELSE document_json END,
+		    retry_after = ?, lease_owner = NULL, lease_until = NULL, last_error = ?, updated_at = ?
+		WHERE id = ? AND status = 'leased' AND lease_owner = ?`,
+		documentJSON, documentJSON, d1TimeValue(retryAfter), MemoryVectorVisibilityPendingMarker, d1TimeValue(now), outboxID, leaseOwner)
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrLeaseExpired
+	}
+	return nil
+}
+
 // FailMemoryVectorOperation returns a leased operation to the queue, either as
 // retryable with a wake time or as permanently failed.
 func (s *d1Store) FailMemoryVectorOperation(
