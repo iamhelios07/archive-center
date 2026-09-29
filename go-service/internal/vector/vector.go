@@ -9,9 +9,10 @@ import (
 
 // Common errors.
 var (
-	ErrNotFound          = errors.New("no vector results found")
-	ErrNotEnabled        = errors.New("vector store is not enabled")
-	ErrVisibilityPending = errors.New("vector mutation accepted but is not visible before the context deadline")
+	ErrNotFound                = errors.New("no vector results found")
+	ErrNotEnabled              = errors.New("vector store is not enabled")
+	ErrVisibilityPending       = errors.New("vector mutation accepted but is not visible before the context deadline")
+	ErrDurableSearchOverloaded = errors.New("durable search overlay exceeds its bounded correction capacity")
 )
 
 // VectorStore defines the core vector search and management contract.

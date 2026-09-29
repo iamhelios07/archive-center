@@ -863,14 +863,15 @@ func vectorizeDimensionConsistency(vectors []vectorizeUpsertVector) error {
 // language, so the session, tier and source table clauses flatten into one
 // object. An empty filter is never sent.
 func vectorizeSearchFilter(sessionID string, filter string) map[string]any {
+	sessionID, tier, sourceTable := searchFilterValues(sessionID, filter)
 	out := map[string]any{}
-	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+	if sessionID != "" {
 		out["chat_session_id"] = sessionID
 	}
-	if tier := tierFromFilter(filter); tier != "" {
+	if tier != "" {
 		out["tier"] = tier
 	}
-	if sourceTable := metadataStringEqualityFromFilter(filter, "source_table"); sourceTable != "" {
+	if sourceTable != "" {
 		out["source_table"] = sourceTable
 	}
 	if len(out) == 0 {
