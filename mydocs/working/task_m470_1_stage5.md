@@ -157,12 +157,63 @@ Cloudflare 계정, account id, API token, D1 database id, Vectorize index id,
 갖춘 배포가 아니다.** Stage 5가 operator 면·artifact·문서를 완성했지만, 그
 이전 단계들의 parity 게이트가 실제 배포 가능을 열었다고 선언할 근거는 없다.
 
+## 보고서 초안 이후에 닫은 것들
+
+보고서를 처음 쓴 뒤 세 커밋이 더 나왔고, 셋 다 이 단계의 operator parity에
+직접 속한다. 초안의 "남은 작업"에 있던 3번은 이 중 하나로 해소됐다.
+
+### 운영자에게 보이는 값이 거짓이던 것들
+
+| 증상 | 원인 | 커밋 |
+| --- | --- | --- |
+| 목록에 뜬 job의 상세 URL이 404 | 상세가 live manager와 reset run만 보고 스냅샷을 안 봤다 | `e80ef7f` |
+| job 이벤트 스트림이 404 | 위와 같고, 404가 job을 지켜보는 순간에 도착해 깨진 endpoint로 읽힌다 | `e80ef7f` |
+| `store_capabilities: "85/86"` | 누락의 이름도, 분모가 작은 이유도 말하지 않았다 | `97aedae` |
+| `requested_by` 컬럼이 영원히 빈 값 | 마이그레이션 002에 컬럼이 있는데 Go 코드가 한 번도 쓰지 않았다 | `7861765` |
+
+**목록과 상세의 불일치는 이 단계에서 내가 만든 것이다.** 스냅샷 영속화를
+넣으면서 목록에만 병합했고, 상세와 이벤트는 손대지 않았다. 404는 "그 id가
+틀렸다"고 말하는데 진실은 "그 job은 끝났다"이므로, 방금 목록에서 읽은 id를
+잘못 옮겨 적었다고 결론내리게 만든다.
+
+**이벤트 스트림은 두 종류를 구분해야 했다.** 끝난 job은 최종 상태 1건을
+보내고 닫는다(미래의 갱신이 없다). reset run은 스트림이 아예 없다 — 진행이
+D1에 체크포인트하는 worker 때문에 나아가지 이 프로세스가 실행해서가 아니다.
+빈 스트림이나 404 대신 409와 이유를 답한다.
+
+**능력 커버리지의 분모**에서 적용 불가 능력을 뺐다. 빠진 하나는
+`ShadowStatusReporter`(MariaDB shadow로의 dual write 실패 횟수)이고
+Cloudflare는 MariaDB를 쓰지 않으므로 보고할 shadow가 없다. 미구현이 아니라
+적용 불가이고, 영원히 도달할 수 없는 분모는 "complete"라고 말할 수 없게 만든다.
+예외는 이름과 **이유**를 함께 선언해야 하고, 이유 없는 예외는 불편한 항목을
+조용히 지운 것과 구분되지 않으므로 테스트가 그걸 막는다.
+
+**reset의 감사 컬럼**은 선언만 되어 있었다. `AdminResetActorStore`를 선택적
+인터페이스로 두어 MariaDB의 공유 계약을 D1 전용 컬럼 때문에 넓히지 않았다.
+actor는 요청의 label, 없으면 peer 주소이며 **Authorization 헤더에서는 절대
+가져오지 않는다** — 토큰은 공유 비밀이고 control plane row는 DB를 읽을 수 있는
+모든 것에게 보인다. 토큰과 같은 값의 label은 버린다. resume은 최초 요청자를
+유지한다: resume은 이어받은 cursor로 계속할 뿐 새 요청이 아니고, 덮어쓰면
+"resume을 누른 사람이 남이 승인한 삭제를 했다"고 기록된다.
+
+### 내가 만든 테스트 결함 두 개
+
+1. **초록으로 보이는 skip.** reset actor 테스트가 vector reset 경로에서 501로
+   끝나 전부 `t.Skipf`로 넘어갔다. 초록이지만 아무것도 검증하지 않는다.
+   `reset_vector:false`로 그 경로를 건너뛰고 Skip을 `Fatalf`로 바꿨다.
+2. **의도한 실패를 구현으로 해소.** 토큰 테스트에서 내가 토큰을 label로
+   넘겼고, 핸들러는 받은 label을 정직하게 기록해 실패했다. 테스트를 약화하는
+   대신 "토큰과 같은 label은 버린다"는 규칙을 구현했다. 운영자가 토큰을
+   label 칸에 붙여넣는 것은 실제로 막을 가치가 있는 경우였다.
+
 ## 남은 작업
 
 1. 인증된 원격 통합 테스트 — 계정 확보가 선행 조건이다.
 2. `seq185` 계약 키 이름의 provider 중립화 — 계약 파괴 여부를 별도로 결정해야
    한다. 이 단계에서는 값이 아니라 이름만 문제가 된다.
-3. `/admin/job/events`(SSE)도 process memory 기준이라 재시작 후 스트림이
-   끊긴다. 스냅샷 영속화와 같은 처리(중단 표시)가 필요하다.
-4. Stage 6 대상 후보: `cloudflareParityComplete`를 검토하려면 C/V/O parity 게이트를
+3. Stage 6 대상 후보: `cloudflareParityComplete`를 검토하려면 C/V/O parity 게이트를
    개별적으로 닫아야 한다.
+4. `reindex`·`rescan`·`session-normalize`·`dedupe-cleanup`은 이제 스냅샷이
+   남지만 재개되지는 않는다. 각 job의 재개 semantics를 설계하면 `interrupted`
+   대신 이어받을 수 있다. 지금은 재개할 수 없는 것을 재개하는 척하지 않는 쪽을
+   택했다.
