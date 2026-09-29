@@ -325,7 +325,7 @@ func (s *Server) handleReferenceVectorStatus(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) referenceVectorStore(w http.ResponseWriter) (vector.VectorStore, bool) {
-	if !s.Cfg.ChromaEnabled || strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		writeError(w, http.StatusServiceUnavailable, "reference_chromadb_not_configured", "ChromaDB is required for the reference vector index")
 		return nil, false
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -62,6 +61,21 @@ type bodyTrackingSettingsFile struct {
 	Sessions        map[string]bodyTrackingConfig `json:"sessions"`
 }
 
+// bodyTrackingSettingsScope addresses the document that holds every session's
+// body tracking configuration.
+//
+// It is one document, not one row per session, because that is what the local
+// file has always been: a single body-tracking.json. Splitting it per session in
+// D1 would make a concurrent edit to two sessions clobber the other, which the
+// file never did because the runtime serialises settings writes under
+// RuntimeConfigMu. The table supports a per-session key, and
+// ListTurnPreparationSettingsKeys exists for export and migration, but the
+// settings path deliberately keeps using the single-document shape so the two
+// backends hold the same thing.
+const bodyTrackingSettingsScope = store.TurnPreparationScopeBodyTracking
+
+const bodyTrackingSettingsKey = store.TurnPreparationDefaultDocumentKey
+
 func bodyTrackingSettingsPath() (string, error) {
 	path, err := multiAgentSettingsPath()
 	if err != nil {
@@ -70,20 +84,24 @@ func bodyTrackingSettingsPath() (string, error) {
 	return filepath.Join(filepath.Dir(path), "body-tracking.json"), nil
 }
 
-func readBodyTrackingSettings() (bodyTrackingSettingsFile, error) {
+// readBodyTrackingSettings loads the document from whichever backend this
+// deployment uses.
+//
+// The local runtime reads its file, exactly as before. A Cloudflare Container
+// reads D1, because a setting written into a container layer is gone the next
+// time the instance restarts, and gone again after any idle period, with no
+// error to explain it. See turn_preparation_settings_backend.go.
+func (s *Server) readBodyTrackingSettings() (bodyTrackingSettingsFile, error) {
 	out := bodyTrackingSettingsFile{ContractVersion: "body_tracking_settings.v1", Sessions: map[string]bodyTrackingConfig{}}
-	path, err := bodyTrackingSettingsPath()
+	payload, found, err := s.loadTurnPreparationDocument(
+		context.Background(), bodyTrackingSettingsScope, bodyTrackingSettingsKey)
 	if err != nil {
 		return out, err
 	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	if !found {
 		return out, nil
 	}
-	if err != nil {
-		return out, err
-	}
-	if err = json.Unmarshal(data, &out); err != nil {
+	if err = json.Unmarshal(payload, &out); err != nil {
 		return out, err
 	}
 	if out.Sessions == nil {
@@ -92,37 +110,24 @@ func readBodyTrackingSettings() (bodyTrackingSettingsFile, error) {
 	return out, nil
 }
 
-func writeBodyTrackingSettings(settings bodyTrackingSettingsFile) error {
-	path, err := bodyTrackingSettingsPath()
+// writeBodyTrackingSettings writes the whole document.
+//
+// It is written whole rather than merged per session, matching the file it
+// replaces: the caller holds RuntimeConfigMu, so read-modify-write is already
+// serialised, and a partial update would be a second document format.
+func (s *Server) writeBodyTrackingSettings(settings bodyTrackingSettingsFile) error {
+	payload, err := json.Marshal(settings)
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".body-tracking-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if err = json.NewEncoder(tmp).Encode(settings); err == nil {
-		err = tmp.Sync()
-	}
-	closeErr := tmp.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return s.saveTurnPreparationDocument(
+		context.Background(), bodyTrackingSettingsScope, bodyTrackingSettingsKey, payload)
 }
 
 func (s *Server) storedBodyTrackingConfig(sid string) (bodyTrackingConfig, bool, error) {
 	s.RuntimeConfigMu.RLock()
 	defer s.RuntimeConfigMu.RUnlock()
-	settings, err := readBodyTrackingSettings()
+	settings, err := s.readBodyTrackingSettings()
 	c, exists := settings.Sessions[sid]
 	if c.Characters == nil {
 		c.Characters = []bodyCharacterConfig{}
@@ -258,7 +263,7 @@ func (s *Server) initializeAutomaticBodyTracking(ctx context.Context, sid string
 func (s *Server) saveBodyTrackingConfig(sid string, c bodyTrackingConfig) (bodyTrackingConfig, error) {
 	s.RuntimeConfigMu.Lock()
 	defer s.RuntimeConfigMu.Unlock()
-	settings, err := readBodyTrackingSettings()
+	settings, err := s.readBodyTrackingSettings()
 	if err != nil {
 		return c, err
 	}
@@ -292,7 +297,7 @@ func (s *Server) saveBodyTrackingConfig(sid string, c bodyTrackingConfig) (bodyT
 		c.Characters = []bodyCharacterConfig{}
 	}
 	settings.Sessions[sid] = c
-	return c, writeBodyTrackingSettings(settings)
+	return c, s.writeBodyTrackingSettings(settings)
 }
 
 // Copy/import preserve the original deterministic model seed, unlike an
@@ -300,18 +305,18 @@ func (s *Server) saveBodyTrackingConfig(sid string, c bodyTrackingConfig) (bodyT
 func (s *Server) restoreBodyTrackingConfig(sid string, c bodyTrackingConfig) error {
 	s.RuntimeConfigMu.Lock()
 	defer s.RuntimeConfigMu.Unlock()
-	settings, err := readBodyTrackingSettings()
+	settings, err := s.readBodyTrackingSettings()
 	if err != nil {
 		return err
 	}
 	settings.Sessions[sid] = c
-	return writeBodyTrackingSettings(settings)
+	return s.writeBodyTrackingSettings(settings)
 }
 
 func (s *Server) copyBodyTrackingConfig(sourceID, targetID string, entityIDs map[string]string) (bool, error) {
 	s.RuntimeConfigMu.Lock()
 	defer s.RuntimeConfigMu.Unlock()
-	settings, err := readBodyTrackingSettings()
+	settings, err := s.readBodyTrackingSettings()
 	if err != nil {
 		return false, err
 	}
@@ -328,7 +333,7 @@ func (s *Server) copyBodyTrackingConfig(sourceID, targetID string, entityIDs map
 		}
 	}
 	settings.Sessions[targetID] = c
-	return true, writeBodyTrackingSettings(settings)
+	return true, s.writeBodyTrackingSettings(settings)
 }
 
 func (s *Server) bodyTrackingRoster(ctx context.Context, sid string, config bodyTrackingConfig) []map[string]any {

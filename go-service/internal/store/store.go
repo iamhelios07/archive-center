@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -532,6 +533,106 @@ type AdminResetResult struct {
 // application rows while preserving the schema so the service can restart.
 type AdminResetStore interface {
 	ResetAll(ctx context.Context) (AdminResetResult, error)
+}
+
+// AdminResetActorStore records WHO asked for a reset alongside what the reset did.
+//
+// It is a separate optional interface rather than a second parameter on ResetAll
+// because the actor column is a D1 control-plane detail. MariaDB's reset has no
+// such column, and widening the shared contract for one provider's audit column
+// would make every implementation carry a value it cannot store, which is how a
+// parameter becomes a field that is passed around and quietly ignored.
+//
+// A store that does not implement it is not deficient. It resets and records the
+// result exactly as before; what it cannot do is say who asked.
+type AdminResetActorStore interface {
+	// ResetAllAs behaves exactly as ResetAll and additionally records actor in the
+	// reset run. An empty actor is allowed and is recorded as empty rather than
+	// substituted with an invented identity: "nobody was named" is a fact, and a
+	// placeholder would be an audit entry that lies.
+	ResetAllAs(ctx context.Context, actor string) (AdminResetResult, error)
+}
+
+// AdminResetActorLimit bounds what will be stored as an actor.
+//
+// The value can come from a request body, so it is attacker-controlled until
+// proven otherwise, and an audit column that can hold a megabyte is a way to grow
+// the control plane without limit. A long value is truncated rather than
+// rejected: losing the tail of a label is a smaller problem than refusing a reset
+// during an incident because the label was too long.
+const AdminResetActorLimit = 200
+
+// NormalizeAdminResetActor trims an actor, strips control characters and truncates
+// it to the stored limit.
+//
+// It deliberately does not invent a value when the input is empty. A caller may
+// substitute a peer address, but this function will not: a placeholder in an audit
+// column is indistinguishable from a real identity later. Control characters go
+// because this value is echoed back by /admin/jobs and lands in log lines.
+func NormalizeAdminResetActor(actor string) string {
+	trimmed := strings.TrimSpace(actor)
+	trimmed = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, trimmed)
+	if len(trimmed) > AdminResetActorLimit {
+		trimmed = trimmed[:AdminResetActorLimit]
+	}
+	return trimmed
+}
+
+// AdminResetRun is the durable state of one administrative reset.
+//
+// It is the same row the D1 reset writes as it works, read back for presentation.
+// The distinction matters because the in-process job manager is memory only: on a
+// stateless Container it is empty after a restart, so an operator polling the job
+// list would see nothing and conclude the reset never ran — while it may have
+// completed, or be part way through a resumable chunk, with the truth sitting in
+// this row.
+type AdminResetRun struct {
+	ResetRunID    string
+	Epoch         int64
+	Status        string
+	RowsDeleted   int64
+	TablesCleared int64
+	StartedAt     string
+	UpdatedAt     string
+	CompletedAt   string
+	LastError     string
+	RetryCount    int64
+	// RequestedBy is who asked for this reset, recorded when the run started.
+	//
+	// Empty means nobody was named, which is a fact rather than an unknown: the
+	// original ResetAll signature had no way to carry an actor, so runs started
+	// before this existed are genuinely unattributed, and a placeholder here would
+	// be indistinguishable from a real identity.
+	RequestedBy string
+	// Durable is true because a row was read back at all. It is stated on the
+	// wire so an operator can tell a reset that survives a restart from an
+	// in-process job that does not, without having to know which backend is in
+	// use.
+	Durable bool
+}
+
+// AdminResetRunReader presents durable administrative reset runs.
+//
+// It is separate from AdminResetStore because reading progress is a different
+// permission from performing a destructive reset, and because a store that can
+// reset without being able to report its own progress is the exact failure this
+// interface exists to prevent.
+type AdminResetRunReader interface {
+	// ListAdminResetRuns returns the most recent runs, newest first. limit <= 0
+	// asks for a small default rather than everything: this backs an operator
+	// polling endpoint, and an unbounded read of a table that only grows is a way
+	// to make a recovery console slow exactly when it is being used.
+	ListAdminResetRuns(ctx context.Context, limit int) ([]AdminResetRun, error)
+
+	// GetAdminResetRun returns one run. found=false is a normal answer for an
+	// unknown id, not an error, so the HTTP layer can answer 404 without treating
+	// a stale bookmark as a failure.
+	GetAdminResetRun(ctx context.Context, resetRunID string) (run AdminResetRun, found bool, err error)
 }
 
 // Store is the canonical truth storage contract.

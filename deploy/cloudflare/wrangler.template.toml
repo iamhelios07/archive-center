@@ -1,0 +1,45 @@
+# Archive Center Cloudflare Worker — deployment template.
+#
+# This tracked template contains only stable binding names and
+# non-account-specific settings. Account IDs, database IDs, index IDs, routes,
+# domains, and secrets are intentionally absent: they are rendered into a
+# temporary, ignored wrangler.toml at deploy time from local protected values
+# (render script arrives in Stage 5). Never commit a rendered wrangler.toml.
+
+name = "archive-center-bridge"
+main = "worker/src/index.ts"
+compatibility_date = "2026-06-01"
+
+[vars]
+# No secrets in tracked config. The shared Container-to-Worker bridge token is
+# a Worker secret:
+#   wrangler secret put BRIDGE_TOKEN
+# The Container receives the same token via AC_CLOUDFLARE_BRIDGE_TOKEN.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "archive-center-db"
+# database_id is account-specific and must be rendered at deploy time.
+
+# NOTE: [[vectorize]] is an ARRAY of tables, like [[d1_databases]] above. The
+# object form ([vectorize]) is valid TOML and wrangler rejects it with
+# `The field "vectorize" should be an array but got {...}`, so a plain TOML
+# parser validating this file will not catch the mistake.
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "archive-center-vectors"
+# Vectorize index IDs are account-specific and must be rendered at deploy time.
+#
+# The index DIMENSION is not set here and cannot be: it is fixed when the index is
+# created, and it is determined by the embedding model the operator's local
+# runtime uses for memory indexing. That model is a per-user setting, so two
+# deployments of this project routinely need different dimensions and there is no
+# default this template could carry.
+#
+# Create the index with the matching width before deploying:
+#   npx wrangler vectorize create archive-center-vectors --dimensions=<N> --metric=cosine
+# See README.md, "Provision the account-scoped resources", for how to determine
+# <N> from data rather than from the declarative AC_EMBEDDER_MODEL.
+
+[observability]
+enabled = true

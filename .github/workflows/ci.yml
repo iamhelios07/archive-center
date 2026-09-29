@@ -43,6 +43,46 @@ jobs:
       - name: Check JavaScript syntax
         run: node --check "Archive Center.js"
 
+      - name: Install Cloudflare Worker dependencies
+        working-directory: deploy/cloudflare/worker
+        # npm ci, not npm install. The lockfile is committed and complete, so npm
+        # never resolves the dependency graph, and that resolution is the step
+        # that crashes under npm 10 with "Cannot read properties of null (reading
+        # 'edgesOut')". It is an Arborist bug in the vitest peer set, not a
+        # conflict a flag could report, so --legacy-peer-deps was only ever a way
+        # of skipping the broken code path.
+        run: npm ci --no-audit --no-fund
+
+      - name: Cloudflare Worker type check
+        working-directory: deploy/cloudflare/worker
+        run: npm run check
+
+      - name: Cloudflare Worker tests
+        working-directory: deploy/cloudflare/worker
+        # Runs the bridge handlers in real workerd against local D1. The runner
+        # script exists because D1 is a disk-backed Durable Object and the
+        # repository carries a Low integrity label; on Windows that makes the
+        # runtime unable to write to the default %TEMP%. The icacls step is
+        # skipped on Linux, where no such rule exists.
+        run: npm test
+
+      - name: Cloudflare tracked artifacts are account-neutral
+        # The bridge payload test checks what the provider SENDS. This checks what
+        # the repository CONTAINS, which a payload test cannot see: a Dockerfile
+        # that bakes in a route, a runbook that documents a real database id, or
+        # a template that grew a literal index name.
+        run: node deploy/cloudflare/scripts/check-artifact-neutrality.mjs
+
+      - name: Cloudflare deploy config renders
+        # Validates the tracked template against the renderer without writing
+        # anything, using throwaway identifiers. Deploying an unrendered template
+        # produces a config whose ids are comments, which wrangler accepts and
+        # then fails at runtime on the first query.
+        env:
+          AC_CLOUDFLARE_D1_DATABASE_ID: 00000000-0000-0000-0000-0000000000fa
+          AC_CLOUDFLARE_VECTORIZE_INDEX_ID: 11111111-1111-1111-1111-1111111111fb
+        run: node deploy/cloudflare/scripts/render-wrangler-config.mjs --check
+
       - name: Simple POSIX fresh-install contract
         shell: bash
         run: sh ./scripts/test-simple-fresh-install.sh

@@ -19,6 +19,16 @@ const (
 	memoryVectorRetryLimitUnconfigured = "MEMORY_VECTOR_RETRY_LIMIT_UNCONFIGURED"
 	memoryVectorRetryLimitReached      = "MEMORY_VECTOR_RETRY_LIMIT_REACHED"
 	memoryVectorRetryDelay             = time.Second
+	// memoryVectorVisibilityBudget bounds the wait a store is given to make a
+	// write readable before the readback verification. It is deliberately close
+	// to memoryVectorRetryDelay: a wait longer than the retry delay would hold the
+	// lease for longer than the caller would otherwise have waited anyway, and a
+	// wait much shorter than it would send a normal asynchronous write down the
+	// retry path, which is the outcome this is here to avoid.
+	memoryVectorVisibilityBudget = time.Second
+	// Propagation can take much longer than a worker lease. This delay spaces
+	// exact visibility checks while the durable marker prevents re-upserts.
+	memoryVectorVisibilityRetryDelay = 15 * time.Second
 )
 
 type memoryVectorProcessResult struct {
@@ -366,24 +376,59 @@ func (s *Server) processClaimedMemoryVectorOperation(
 		}
 		delete(document.Metadata, "contextualized_embedding_inputs")
 		delete(document.Metadata, "contextualized_embedding_index")
-		if err := s.Vector.Upsert(vectorCtx, item.ChatSessionID, []vector.VectorDocument{document}); err != nil {
-			result.CanonicalState = "retryable"
-			result.Failure = err.Error()
-			return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, err.Error())
+		visibilityPending := item.LastError == store.MemoryVectorVisibilityPendingMarker
+		if !visibilityPending {
+			if err := s.Vector.Upsert(vectorCtx, item.ChatSessionID, []vector.VectorDocument{document}); err != nil {
+				if errors.Is(err, vector.ErrVisibilityPending) {
+					if deferred, deferErr := s.deferMemoryVectorVisibility(ctx, outbox, item, document, leaseOwner, now, &result, err.Error()); deferred {
+						return result, deferErr
+					}
+				}
+				result.CanonicalState = "retryable"
+				result.Failure = err.Error()
+				return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, err.Error())
+			}
+			// An acknowledged asynchronous upsert is not replayed merely because
+			// Vectorize has not exposed it yet. The durable deferral below releases
+			// the lease and restores the claim attempt.
+			if waiter, ok := s.Vector.(vector.VectorVisibilityWaiter); ok && vector.HasVisibilityWaiter(s.Vector) {
+				if err := waiter.AwaitVisible(vectorCtx, []string{item.DocumentID}, memoryVectorVisibilityBudget); err != nil {
+					if deferred, deferErr := s.deferMemoryVectorVisibility(ctx, outbox, item, document, leaseOwner, now, &result, err.Error()); deferred {
+						return result, deferErr
+					}
+					result.CanonicalState = "retryable"
+					result.Failure = "vector upsert is not visible yet: " + err.Error()
+					return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, result.Failure)
+				}
+			}
 		}
 		reader, ok := s.Vector.(vector.ExactDocumentReader)
-		if !ok {
+		// Canonical fallback is for callers. Outbox completion must prove the
+		// accelerator itself, otherwise a visibility-pending D1 row would mask a
+		// still-invisible Vectorize write.
+		var readback []vector.VectorDocument
+		var readErr error
+		if accelerated, acceleratedOK := s.Vector.(vector.AcceleratorExactDocumentReader); acceleratedOK {
+			readback, readErr = accelerated.GetAcceleratorDocuments(vectorCtx, []string{item.DocumentID})
+		} else if ok {
+			readback, readErr = reader.GetDocuments(vectorCtx, []string{item.DocumentID})
+		} else {
 			result.CanonicalState = "retryable"
 			result.Failure = "vector exact readback is not supported"
 			return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, result.Failure)
 		}
-		readback, readErr := reader.GetDocuments(vectorCtx, []string{item.DocumentID})
 		if readErr != nil {
+			if deferred, deferErr := s.deferMemoryVectorVisibility(ctx, outbox, item, document, leaseOwner, now, &result, readErr.Error()); deferred {
+				return result, deferErr
+			}
 			result.CanonicalState = "retryable"
 			result.Failure = "vector upsert readback failed: " + readErr.Error()
 			return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, result.Failure)
 		}
 		if verifyErr := verifyMemoryVectorUpsertReadback(item, document, readback); verifyErr != nil {
+			if deferred, deferErr := s.deferMemoryVectorVisibility(ctx, outbox, item, document, leaseOwner, now, &result, verifyErr.Error()); deferred {
+				return result, deferErr
+			}
 			result.CanonicalState = "retryable"
 			result.Failure = verifyErr.Error()
 			return result, s.retryMemoryVectorOperation(ctx, outbox, item, leaseOwner, now, &result, result.Failure)
@@ -429,6 +474,31 @@ func (s *Server) processClaimedMemoryVectorOperation(
 	}
 	result.CanonicalState = "completed"
 	return result, nil
+}
+
+// deferMemoryVectorVisibility converts an accepted asynchronous write into a
+// durable visibility-pending state. Stores without that capability retain the
+// established retry path, which keeps non-Cloudflare test and legacy stores
+// behaviourally unchanged.
+func (s *Server) deferMemoryVectorVisibility(ctx context.Context, outbox store.MemoryVectorOutboxStore, item *store.MemoryVectorOutboxItem, document vector.VectorDocument, leaseOwner string, now time.Time, result *memoryVectorProcessResult, cause string) (bool, error) {
+	if !vector.HasVisibilityWaiter(s.Vector) {
+		return false, nil
+	}
+	pending, ok := outbox.(store.MemoryVectorVisibilityPendingStore)
+	if !ok {
+		return false, nil
+	}
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return true, fmt.Errorf("marshal accepted vector document: %w", err)
+	}
+	if err := pending.DeferMemoryVectorVisibility(ctx, item.ID, leaseOwner, now, now.Add(memoryVectorVisibilityRetryDelay), string(payload)); err != nil {
+		return true, err
+	}
+	result.VectorApplied = true
+	result.CanonicalState = "visibility_pending"
+	result.Failure = "vector upsert accepted; visibility pending: " + cause
+	return true, nil
 }
 
 func memoryVectorMaterializationFromDocument(item *store.MemoryVectorOutboxItem, document vector.VectorDocument, resolvedModel string) (store.MemoryVectorMaterialization, bool, error) {

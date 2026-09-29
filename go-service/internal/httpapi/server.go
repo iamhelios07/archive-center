@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/risulongmemory/archive-center-go/internal/cloudflarebridge"
 	"github.com/risulongmemory/archive-center-go/internal/config"
 	"github.com/risulongmemory/archive-center-go/internal/diagnostics"
 	"github.com/risulongmemory/archive-center-go/internal/store"
@@ -59,18 +61,75 @@ type Server struct {
 	indexRecoveryContext     context.Context
 }
 
+// vectorPreflightError names the accelerator this deployment actually uses.
+//
+// It used to be three separate literals that all said "chromadb startup
+// preflight failed (api_path=...)", one per failure path. A Cloudflare
+// deployment therefore reported a dead Vectorize bridge as a ChromaDB failure
+// and pointed the operator at a Chroma API path that exists in no part of that
+// deployment. The refusal to start was right; the message sent someone to the
+// wrong place to fix it, and it cost them every minute between the container
+// exiting and their believing the log.
+//
+// This is found by running the built image, not by a unit test: the image was
+// configured correctly and exited with the wrong name, because the path that
+// fires first in a container is the Health one, and only the VectorOpenError
+// path had been corrected.
+//
+// One function, used by every path, so the next failure cannot reintroduce a
+// fourth name.
+//
+// The cause is wrapped with %w rather than flattened to a string. A caller — and
+// a test — decides what to do with this error by matching on it, and callers
+// check for context.Canceled when a startup is aborted. An earlier draft took
+// err.Error() and formatted it with %s, which preserved the text and destroyed
+// the chain, so errors.Is(err, context.Canceled) went false.
+func (s *Server) vectorPreflightError(cause error) error {
+	if s.Cfg.IsCloudflareProfile() {
+		return fmt.Errorf("cloudflare vectorize startup preflight failed (bridge=%s): %w",
+			redactedBridgeHost(s.Cfg.CloudflareBridgeURL), cause)
+	}
+	return fmt.Errorf("chromadb startup preflight failed (api_path=%s): %w", s.Cfg.ChromaAPIPath, cause)
+}
+
+// redactedBridgeHost reduces a bridge URL to scheme, host and port.
+//
+// The preflight message goes to logs and to whoever is reading them, and a URL is
+// exactly the shape people paste a token into. Dropping userinfo, path and query
+// keeps the one part that identifies which bridge failed — and if the URL does not
+// parse, returning the raw string is worse than returning nothing useful, so the
+// value is replaced rather than echoed.
+func redactedBridgeHost(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		if trimmed := strings.TrimSpace(raw); trimmed == "" {
+			return "unset"
+		}
+		return "unparseable"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
 // ValidateRuntimeDependencies verifies live dependencies before the HTTP
 // service advertises readiness. Chroma Health checks both the configured API
 // heartbeat and collection endpoint without deleting existing data.
 func (s *Server) ValidateRuntimeDependencies(ctx context.Context) error {
-	if s.StoreOpenError != nil && s.Cfg.StoreMode == config.StoreModeMariaDBAuthority {
-		return fmt.Errorf("mariadb startup preflight failed: %w", s.StoreOpenError)
+	// A canonical authority whose store could not open must fail startup rather
+	// than serve requests against a no-op store. The Cloudflare D1 provider is an
+	// authority too, so it is covered by the same gate.
+	if s.StoreOpenError != nil {
+		switch s.Cfg.StoreMode {
+		case config.StoreModeMariaDBAuthority:
+			return fmt.Errorf("mariadb startup preflight failed: %w", s.StoreOpenError)
+		case config.StoreModeCloudflareAuthority:
+			return fmt.Errorf("cloudflare d1 startup preflight failed: %w", s.StoreOpenError)
+		}
 	}
-	if !s.Cfg.ChromaEnabled || strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() {
 		return nil
 	}
 	if s.VectorOpenError != nil {
-		return fmt.Errorf("chromadb startup preflight failed (api_path=%s): %w", s.Cfg.ChromaAPIPath, s.VectorOpenError)
+		return s.vectorPreflightError(s.VectorOpenError)
 	}
 	if recovery, ok := s.Vector.(vector.IndexRecovery); ok && s.Cfg.StoreMode == config.StoreModeMariaDBAuthority {
 		if err := recovery.ResumeIndexRecovery(ctx, s.indexRecoveryJournalPath()); err != nil {
@@ -90,10 +149,10 @@ func (s *Server) ValidateRuntimeDependencies(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("chromadb startup preflight failed (api_path=%s): %w", s.Cfg.ChromaAPIPath, err)
+		return s.vectorPreflightError(err)
 	}
 	if strings.TrimSpace(health.Status) != "ok" || !health.ModelReady {
-		return fmt.Errorf("chromadb startup preflight failed (api_path=%s): status=%s model_ready=%t", s.Cfg.ChromaAPIPath, health.Status, health.ModelReady)
+		return s.vectorPreflightError(fmt.Errorf("status=%s model_ready=%t", health.Status, health.ModelReady))
 	}
 	// Original-work reference retrieval is an optional capability. Its separate
 	// collection health is reported by /ready and must not block the main store,
@@ -110,6 +169,45 @@ func NewServer(cfg config.Config) *Server {
 	var referenceVS vector.VectorStore
 	var referenceVectorErr error
 	switch {
+	case cfg.IsCloudflareProfile():
+		// The Cloudflare profile reaches Vectorize only through the Worker bridge,
+		// and the bridge token is the accelerator's credential — there is no
+		// endpoint to hand to a Chroma constructor. An unusable bridge is reported
+		// as a loud open error rather than falling back to the fake store, so an
+		// unwired deployment cannot appear to be persisting a vector index.
+		client, err := cloudflarebridge.NewClient(cfg.CloudflareBridgeURL, cfg.CloudflareBridgeToken, 0)
+		if err != nil {
+			vectorErr = fmt.Errorf("cloudflare bridge client: %w", err)
+			referenceVectorErr = vectorErr
+		} else if provider, err := vector.NewVectorizeStore(client); err != nil {
+			vectorErr = err
+			referenceVectorErr = err
+		} else {
+			// Vectorize applies mutations asynchronously. Keep that detail behind a
+			// context-bound blocking facade so a successful VectorStore.Upsert has
+			// the same observable visibility boundary as the ChromaDB contract.
+			blockingProvider := vector.NewVisibilityBlockingVectorStore(provider)
+			// D1 owns the canonical document manifest. Compose it with Vectorize so
+			// lifecycle reads retain the established VectorStore signatures while
+			// similarity search remains on the accelerator.
+			if canonical, ok := st.(store.CanonicalVectorDocumentStore); ok {
+				canonicalProvider := vector.NewCanonicalVectorStore(blockingProvider, canonical)
+				// Search stays accelerator-led, but D1's bounded visibility delta
+				// corrects only the short replica-lag window. The wrapper is Cloudflare
+				// composition only: a local Chroma store never receives this provider.
+				vs = vector.NewDurableSearchOverlayVectorStore(canonicalProvider, canonical)
+			} else {
+				vs = blockingProvider
+			}
+			// One Vectorize index holds both document families, so the two stores
+			// must stay separable. The discriminator is the document tier, not a
+			// second index: session documents are addressed by chat_session_id and
+			// reference documents by a "reference_" tier prefix, and neither
+			// audience queries the other key. A reference document that acquired a
+			// chat_session_id would leak into a session recall, so the separation
+			// has to be asserted rather than assumed.
+			referenceVS = blockingProvider
+		}
 	case cfg.ChromaEnabled && strings.TrimSpace(cfg.ChromaEndpoint) != "":
 		vs, vectorErr = vector.NewChromaStore(cfg.ChromaEndpoint, cfg.ChromaCollection, cfg.ChromaAPIPath)
 		referenceVS, referenceVectorErr = vector.NewChromaStore(cfg.ChromaEndpoint, cfg.ReferenceChromaCollection, cfg.ChromaAPIPath)
@@ -125,7 +223,7 @@ func NewServer(cfg config.Config) *Server {
 	}
 	vs = vector.NewMutationFencedStore(vs)
 	referenceVS = vector.NewMutationFencedStore(referenceVS)
-	return &Server{
+	s := &Server{
 		Cfg:                      cfg,
 		Started:                  started,
 		BackendInstanceID:        newBackendInstanceID(started),
@@ -142,6 +240,11 @@ func NewServer(cfg config.Config) *Server {
 		SourceAcceptances:        newCompleteTurnSourceAcceptanceLedger(),
 		RollbackDecisions:        newRollbackDecisionLedger(),
 	}
+	// Wired after construction, and before any route can serve, so an inherited
+	// job is already marked interrupted on the first request rather than there
+	// being a window where the list is briefly empty.
+	s.attachAdminJobPersistence()
+	return s
 }
 
 func newBackendInstanceID(started time.Time) string {
@@ -188,18 +291,54 @@ func newStoreForConfig(cfg config.Config) (store.Store, error) {
 			return store.NewNoopStore(), err
 		}
 		return fixture, nil
+	case config.StoreModeCloudflareAuthority:
+		// The Cloudflare profile reaches D1 only through the Worker bridge. An
+		// unusable bridge configuration is reported as a loud open error rather
+		// than falling back to a no-op store, so an unwired deployment cannot
+		// appear to persist canonical writes.
+		client, err := cloudflarebridge.NewClient(cfg.CloudflareBridgeURL, cfg.CloudflareBridgeToken, 0)
+		if err != nil {
+			return store.NewNoopStore(), fmt.Errorf("cloudflare bridge client: %w", err)
+		}
+		conn, err := store.NewD1BridgeConn(client)
+		if err != nil {
+			return store.NewNoopStore(), err
+		}
+		d1, err := store.NewD1Store(conn)
+		if err != nil {
+			return store.NewNoopStore(), err
+		}
+		return d1, nil
 	default:
 		return store.NewNoopStore(), nil
 	}
 }
 
-func (s *Server) usesShadowWriteStore() bool {
+// hasCanonicalWriteCapability reports whether the selected provider can own
+// canonical writes.
+//
+// It replaces a MariaDB-only mode list: the Cloudflare D1 provider is a
+// first-class canonical authority, so keying the write and reset routes off
+// MariaDB mode names would silently lock Cloudflare out of them.
+func (s *Server) hasCanonicalWriteCapability() bool {
 	if errors.Is(s.StoreOpenError, store.ErrNotEnabled) {
 		return false
 	}
-	return s.Cfg.StoreMode == config.StoreModeDualShadow ||
-		s.Cfg.StoreMode == config.StoreModeMariaDBShadow ||
-		s.Cfg.StoreMode == config.StoreModeMariaDBAuthority
+	switch s.Cfg.StoreMode {
+	case config.StoreModeDualShadow,
+		config.StoreModeMariaDBShadow,
+		config.StoreModeMariaDBAuthority,
+		config.StoreModeCloudflareAuthority:
+		return true
+	default:
+		return false
+	}
+}
+
+// usesShadowWriteStore keeps the original call-site name while delegating to the
+// provider-neutral capability check.
+func (s *Server) usesShadowWriteStore() bool {
+	return s.hasCanonicalWriteCapability()
 }
 
 func (s *Server) storeWriteSource() string {
@@ -210,6 +349,8 @@ func (s *Server) storeWriteSource() string {
 		return "mariadb_shadow"
 	case config.StoreModeDualShadow:
 		return "dual_shadow"
+	case config.StoreModeCloudflareAuthority:
+		return "cloudflare_d1"
 	default:
 		return "shadow"
 	}

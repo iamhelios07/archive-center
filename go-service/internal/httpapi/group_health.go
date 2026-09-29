@@ -113,10 +113,88 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	checks["store_mode"] = string(s.Cfg.StoreMode)
 	checks["runtime_profile"] = string(s.Cfg.RuntimeProfile)
 	checks["vector_mode"] = string(s.Cfg.VectorMode)
+
+	// Which accelerator this deployment is BUILT AROUND, and whether it is
+	// required or merely available.
+	//
+	// The accelerator is reported independently of provider-specific legacy
+	// configuration. A Cloudflare deployment uses Vectorize through its bridge,
+	// while local deployments can use ChromaDB.
+	//
+	// This used to branch on ChromaEnabled alone, which is false on the
+	// Cloudflare profile, so the answer would have been "mariadb_fallback" —
+	// wrong twice over. The accelerator there is Vectorize, and the canonical
+	// store is D1, so naming MariaDB sends an operator to a store that is not in
+	// the path. A readiness report has to be able to send someone to the right
+	// place.
+	switch {
+	case s.Cfg.VectorMode == config.VectorModeCloudflare:
+		// The Cloudflare profile selects Vectorize as a required part of the
+		// deployment, and its validation refuses to start without the bridge
+		// credentials. There is no "optional" case to report.
+		checks["vector_accelerator"] = "vectorize"
+		checks["vector_engine_policy"] = "vectorize_required"
+	case s.Cfg.ChromaEnabled:
+		checks["vector_accelerator"] = "chromadb"
+		if s.Cfg.VectorRequiresEndpoint() {
+			checks["vector_engine_policy"] = "chromadb_required"
+		} else {
+			checks["vector_engine_policy"] = "chromadb_optional"
+		}
+	case s.Cfg.VectorMode == config.VectorModeOff:
+		checks["vector_accelerator"] = "none"
+		checks["vector_engine_policy"] = "off"
+	default:
+		checks["vector_accelerator"] = "mariadb_fallback"
+		checks["vector_engine_policy"] = "fallback"
+	}
+	// The name the running process actually reports, which is the one an operator
+	// should match against a real index. It is empty when nothing is reachable,
+	// and that empty value is informative: it is the difference between "this
+	// deployment is built around ChromaDB" and "ChromaDB is reachable right now".
+	checks["vector_accelerator_reachable"] = s.Cfg.VectorAcceleratorName()
+
+	// Whether this deployment persists turn preparation settings durably. The local
+	// runtime writes them beside its data directory and a Cloudflare Container
+	// keeps them in D1, so the answer differs by deployment. An operator needs it
+	// stated rather than inferred: a setting that lives in a container layer is
+	// gone after an idle period, with no error anywhere to explain it.
+	if s.turnPreparationSettingsAvailable() {
+		checks["turn_preparation_settings"] = "durable"
+	} else {
+		checks["turn_preparation_settings"] = "filesystem"
+	}
+
 	if s.StoreOpenError != nil {
 		checks["store_open_error"] = s.StoreOpenError.Error()
 	} else {
 		checks["store_open_error"] = "none"
+	}
+
+	durableOverlayDegraded := false
+	if s.Cfg.IsCloudflareProfile() {
+		if strings.TrimSpace(s.Cfg.CloudflareBridgeURL) != "" && strings.TrimSpace(s.Cfg.CloudflareBridgeToken) != "" {
+			checks["cloudflare_bridge"] = "configured"
+		} else {
+			checks["cloudflare_bridge"] = "not_configured"
+		}
+		// Coverage remains observable for operators, but it is no longer a
+		// hard-coded bootstrap gate. Real runtime failures below determine
+		// readiness.
+		profile := string(s.Cfg.RuntimeProfile)
+		implemented, applicable, total := store.CapabilityCoverageForProfile(s.Store, profile)
+		checks["store_capabilities"] = strconv.Itoa(implemented) + "/" + strconv.Itoa(applicable)
+		if missing := store.MissingApplicableCapabilities(s.Store, profile); len(missing) > 0 {
+			checks["store_capabilities_missing"] = strings.Join(missing, ",")
+		}
+		if total != applicable {
+			names := make([]string, 0, 2)
+			for _, exemption := range store.CapabilityExemptionsFor(profile) {
+				names = append(names, exemption.Capability+" ("+exemption.Reason+")")
+			}
+			checks["store_capabilities_inapplicable"] = strings.Join(names, "; ")
+		}
+		durableOverlayDegraded = s.addDurableSearchOverlayReadiness(r.Context(), checks)
 	}
 
 	if s.Cfg.Readiness.MariaDBConfigured {
@@ -140,11 +218,17 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		checks["chromadb"] = "not_configured"
 	}
 	vectorReady := false
-	vectorDegraded := false
+	vectorDegraded := durableOverlayDegraded
 	if s.indexRecoveryState.Load() == 2 {
 		checks["chromadb_vector"] = "recovering"
 		checks["chromadb_recovery"] = "running"
-	} else if s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.VectorOpenError == nil {
+	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil && s.Vector == nil {
+		checks["chromadb_vector"] = "unavailable"
+		checks["chromadb_vector_error"] = "vector store is not initialized"
+		if !s.Cfg.VectorRequiresEndpoint() {
+			vectorDegraded = true
+		}
+	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil {
 		health, healthErr := s.Vector.Health(r.Context())
 		if healthErr == nil && strings.TrimSpace(health.Status) == "ok" && health.ModelReady {
 			checks["chromadb_vector"] = "enabled"
@@ -167,7 +251,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			checks["chromadb_recovery"] = "failed"
 			checks["chromadb_recovery_detail"] = "check diagnostic logs or embedding settings"
 		}
-	} else if s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" {
+	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() {
 		checks["chromadb_vector"] = "open_error"
 		if s.VectorOpenError != nil {
 			checks["chromadb_vector_error"] = s.VectorOpenError.Error()
@@ -186,33 +270,19 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			vectorDegraded = true
 		}
 	}
-	if s.Cfg.ChromaEnabled {
-		checks["vector_accelerator"] = "chromadb"
-		if s.Cfg.VectorRequiresEndpoint() {
-			checks["vector_engine_policy"] = "chromadb_required"
-		} else {
-			checks["vector_engine_policy"] = "chromadb_optional"
-		}
-	} else if s.Cfg.VectorMode == config.VectorModeOff {
-		checks["vector_accelerator"] = "none"
-		checks["vector_engine_policy"] = "off"
-	} else {
-		checks["vector_accelerator"] = "mariadb_fallback"
-		checks["vector_engine_policy"] = "fallback"
-	}
 
 	referenceVectorReady := false
 	referenceVectorDegraded := false
 	switch {
-	case s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.ReferenceVectorOpenError != nil:
+	case s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.ReferenceVectorOpenError != nil:
 		checks["reference_chromadb_vector"] = "open_error"
 		checks["reference_chromadb_vector_error"] = s.ReferenceVectorOpenError.Error()
 		referenceVectorDegraded = true
-	case s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" && s.ReferenceVector == nil:
+	case s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.ReferenceVector == nil:
 		checks["reference_chromadb_vector"] = "unavailable"
 		checks["reference_chromadb_vector_error"] = "reference vector store is not initialized"
 		referenceVectorDegraded = true
-	case s.Cfg.ChromaEnabled && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "":
+	case s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured():
 		health, healthErr := s.ReferenceVector.Health(r.Context())
 		if healthErr == nil && strings.TrimSpace(health.Status) == "ok" && health.ModelReady {
 			checks["reference_chromadb_vector"] = "enabled"

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -42,6 +43,46 @@ type adminDatabaseResetRequest struct {
 	Debug       bool   `json:"debug"`
 	Confirm     string `json:"confirm"`
 	ResetVector *bool  `json:"reset_vector"`
+	// Operator is an optional label recorded as who asked for the reset.
+	//
+	// It is a label rather than an authenticated identity because the profile
+	// authenticates with a single shared bearer token, which says "an operator" and
+	// not which one. Recording a label the caller supplies, with the peer address as
+	// a fallback, is the honest version: it is what the deployment can actually know.
+	Operator string `json:"operator"`
+}
+
+// requestPeerLabel describes where a request came from, for the audit column.
+//
+// The peer address is the only identity a request reliably carries when the
+// profile authenticates with one shared token. It is weak attribution — a proxy
+// or a shared egress address makes it ambiguous — but it is true, and a weak true
+// value is better than a strong invented one.
+//
+// Both sources are validated as addresses rather than copied. The header is
+// caller-controlled, so accepting arbitrary text would turn an audit column into
+// free-text storage that anyone with the shared token could write to, and would
+// also let one value be crafted to look like another. An unparseable value is
+// ignored in favour of the next source, not stored.
+func requestPeerLabel(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if forwarded := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); forwarded != "" {
+		// Cloudflare sets this to the real client address, which is more useful
+		// than the proxy address the connection actually arrives from.
+		if net.ParseIP(forwarded) != nil {
+			return "cf-connecting-ip:" + forwarded
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	if net.ParseIP(host) == nil {
+		return ""
+	}
+	return "remote-addr:" + host
 }
 
 type adminVectorResetter interface {
@@ -76,7 +117,7 @@ func (s *Server) handleAdminDatabaseReset(w http.ResponseWriter, r *http.Request
 	vectorStatus := "skipped_by_request"
 	if resetVector {
 		switch {
-		case strings.TrimSpace(s.Cfg.ChromaEndpoint) == "":
+		case !s.Cfg.VectorAcceleratorConfigured():
 			vectorStatus = "skipped_no_chroma_endpoint"
 		default:
 			vectorResetter, ok := s.Vector.(adminVectorResetter)
@@ -92,7 +133,37 @@ func (s *Server) handleAdminDatabaseReset(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	result, err := resetStore.ResetAll(r.Context())
+	// The actor is recorded when the store can carry one.
+	//
+	// It comes from an explicit label in the request, falling back to the peer
+	// address. It is NEVER taken from the Authorization header: the token is a
+	// shared secret, and putting it in a control-plane row makes it readable by
+	// anything that can read the database, which is a worse problem than an
+	// unattributed reset. A shared token also identifies "an operator" rather than
+	// which one, so it would be a misleading audit value even if storing it were
+	// safe.
+	//
+	// A label that happens to EQUAL the token is dropped for the same reason. There
+	// is no legitimate reading in which an operator names themselves with the
+	// deployment's shared secret, and the realistic way it happens is a paste
+	// mistake: reaching for the token field and hitting the label field. Dropping it
+	// silently is deliberate — the reset is not refused over a mislabelled call, and
+	// the audit row records the peer address instead.
+	actor := store.NormalizeAdminResetActor(req.Operator)
+	if actor != "" && actor == store.NormalizeAdminResetActor(s.Cfg.Auth.BearerToken) {
+		actor = ""
+	}
+	if actor == "" {
+		actor = store.NormalizeAdminResetActor(requestPeerLabel(r))
+	}
+
+	var result store.AdminResetResult
+	var err error
+	if actorStore, ok := resetStore.(store.AdminResetActorStore); ok {
+		result, err = actorStore.ResetAllAs(r.Context(), actor)
+	} else {
+		result, err = resetStore.ResetAll(r.Context())
+	}
 	if err != nil {
 		writeInternalError(w, "database reset failed: "+err.Error())
 		return

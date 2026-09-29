@@ -1602,6 +1602,36 @@ func (m *mariadbStore) CompleteMemoryVectorOperation(ctx context.Context, outbox
 	return m.finishMemoryVectorOperation(ctx, outboxID, leaseOwner, now, time.Time{}, false, false, "")
 }
 
+// DeferMemoryVectorVisibility records an accepted but not yet readable
+// accelerator upsert without spending an execution retry attempt.
+func (m *mariadbStore) DeferMemoryVectorVisibility(ctx context.Context, outboxID int64, leaseOwner string, now, retryAfter time.Time, documentJSON string) error {
+	if err := m.ensureDB(); err != nil {
+		return err
+	}
+	now = nonZeroTime(now)
+	if retryAfter.Before(now) {
+		retryAfter = now
+	}
+	result, err := m.db.ExecContext(ctx, `
+		UPDATE memory_vector_outbox
+		SET status = 'retryable', attempts = GREATEST(attempts - 1, 0),
+		    document_json = CASE WHEN ? <> '' THEN ? ELSE document_json END,
+		    retry_after = ?, lease_owner = NULL, lease_until = NULL, last_error = ?, updated_at = ?
+		WHERE id = ? AND status = 'leased' AND lease_owner = ?`,
+		documentJSON, documentJSON, retryAfter, MemoryVectorVisibilityPendingMarker, now, outboxID, leaseOwner)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrLeaseExpired
+	}
+	return nil
+}
+
 func (m *mariadbStore) CompleteMemoryVectorMaterializedOperation(
 	ctx context.Context,
 	outboxID int64,

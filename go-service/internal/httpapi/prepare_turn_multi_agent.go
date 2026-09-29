@@ -231,7 +231,39 @@ func multiAgentSettingsPath() (string, error) {
 func (s *Server) loadMultiAgentSettings() (multiAgentSettings, error) {
 	s.RuntimeConfigMu.RLock()
 	defer s.RuntimeConfigMu.RUnlock()
-	return readMultiAgentSettings()
+	return s.readMultiAgentSettings()
+}
+
+// readMultiAgentSettings loads the multi-agent document from whichever backend
+// this deployment uses. The Cloudflare profile reads it from D1 because a
+// Container layer is not durable; the local runtime keeps its file. See
+// turn_preparation_settings_backend.go for why the dispatch is on the store
+// capability rather than on the profile.
+func (s *Server) readMultiAgentSettings() (multiAgentSettings, error) {
+	c := defaultMultiAgentSettings()
+	payload, found, err := s.loadTurnPreparationDocument(
+		context.Background(), store.TurnPreparationScopeMultiAgent, store.TurnPreparationDefaultDocumentKey)
+	if err != nil {
+		return c, err
+	}
+	if !found {
+		return c, nil
+	}
+	err = json.Unmarshal(payload, &c)
+	return c, err
+}
+
+// saveMultiAgentSettings writes the document whole, the way the local file
+// backend always has. A partial update is not offered: the merge already happens
+// in the handler, and a second writer that merged fields would be a second
+// document format to keep compatible.
+func (s *Server) saveMultiAgentSettings(c multiAgentSettings) error {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return s.saveTurnPreparationDocument(
+		context.Background(), store.TurnPreparationScopeMultiAgent, store.TurnPreparationDefaultDocumentKey, payload)
 }
 
 func readMultiAgentSettings() (multiAgentSettings, error) {
@@ -269,7 +301,7 @@ func (s *Server) handleMultiAgentSettings(w http.ResponseWriter, r *http.Request
 		}
 		next := multiAgentSettings{}
 		s.RuntimeConfigMu.Lock()
-		current, err := readMultiAgentSettings()
+		current, err := s.readMultiAgentSettings()
 		if err == nil {
 			next = current
 			if payload.Enabled != nil {
@@ -298,32 +330,10 @@ func (s *Server) handleMultiAgentSettings(w http.ResponseWriter, r *http.Request
 			if next.CandidateChars <= 0 {
 				next.CandidateChars = 64000
 			}
-			var path string
-			path, err = multiAgentSettingsPath()
-			if err == nil {
-				err = os.MkdirAll(filepath.Dir(path), 0700)
-			}
-			if err == nil {
-				var tmp *os.File
-				tmp, err = os.CreateTemp(filepath.Dir(path), ".preprocessing-*")
-				if err == nil {
-					name := tmp.Name()
-					err = json.NewEncoder(tmp).Encode(next)
-					if err == nil {
-						err = tmp.Sync()
-					}
-					closeErr := tmp.Close()
-					if err == nil {
-						err = closeErr
-					}
-					if err == nil {
-						err = os.Rename(name, path)
-					}
-					if err != nil {
-						_ = os.Remove(name)
-					}
-				}
-			}
+			// One call, whichever backend this deployment has. The file path and
+			// the D1 path both write the document whole and both are atomic from a
+			// reader's point of view, so the handler does not care which fired.
+			err = s.saveMultiAgentSettings(next)
 		}
 		s.RuntimeConfigMu.Unlock()
 		if err != nil {

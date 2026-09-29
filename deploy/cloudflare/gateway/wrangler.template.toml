@@ -1,0 +1,30 @@
+# Archive Center public Container gateway — deployment template.
+#
+# The generated gateway config is ignored. It receives the account-scoped
+# Container image URI and private bridge URL at deploy time; neither belongs in
+# tracked source. BRIDGE_TOKEN and AC_BEARER_TOKEN are Worker secrets.
+
+name = "archive-center-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+[vars]
+# BRIDGE_URL is rendered from a protected deployment value. It is the only
+# Container-to-Worker endpoint; the Container receives no Cloudflare API token.
+
+[[durable_objects.bindings]]
+name = "ARCHIVE_CENTER"
+class_name = "ArchiveCenterContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ArchiveCenterContainer"]
+
+[[containers]]
+class_name = "ArchiveCenterContainer"
+# Replaced by the ignored renderer output with a Cloudflare Registry image URI.
+image = "registry.cloudflare.com/archive-center/archive-center-go:render-me"
+max_instances = 1
+
+[observability]
+enabled = true

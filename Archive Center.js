@@ -98,6 +98,7 @@
   const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     bridgeUrl: "http://127.0.0.1:28080",
+    backendBearerToken: "",
     webDirectBridgeEnabled: false,
     dbEnabled: true,
     supervisorEnabled: true,
@@ -12039,8 +12040,12 @@
     merged.dbEnabled = true;
     // 저장 무결성 정책: turn 삭제 감지는 비활성화하지 않는다.
     merged.rollbackAutoEnabled = true;
-    // bridgeUrl 방어
+    // Backend connection settings. The bearer token is optional so existing
+    // loopback MariaDB deployments keep their unauthenticated behavior.
     merged.bridgeUrl = sanitizeBridgeUrl(merged.bridgeUrl);
+    merged.backendBearerToken = typeof merged.backendBearerToken === "string"
+      ? merged.backendBearerToken.trim()
+      : "";
     merged.webDirectBridgeEnabled = merged.webDirectBridgeEnabled === true;
     merged.narrativeGuideMode = sanitizeEnumValue(
       merged.narrativeGuideMode,
@@ -14323,6 +14328,7 @@
 
   function safeSettingsForLog(s) {
     const copy = { ...s };
+    if (copy.backendBearerToken) copy.backendBearerToken = "[configured]";
     if (copy.pluginMainApiKey) copy.pluginMainApiKey = maskApiKey(copy.pluginMainApiKey);
     if (copy.subLlmApiKey) copy.subLlmApiKey = maskApiKey(copy.subLlmApiKey);
     if (copy.embeddingApiKey) copy.embeddingApiKey = maskApiKey(copy.embeddingApiKey);
@@ -14426,6 +14432,15 @@
       const mergedHeaders = rawBody ? {} : { "Content-Type": "application/json" };
       if (headers && typeof headers === "object") {
         Object.assign(mergedHeaders, headers);
+      }
+      const backendBearerToken = typeof bridgeSettings.backendBearerToken === "string"
+        ? bridgeSettings.backendBearerToken.trim()
+        : "";
+      if (backendBearerToken) {
+        Object.keys(mergedHeaders).forEach(function(key) {
+          if (String(key).toLowerCase() === "authorization") delete mergedHeaders[key];
+        });
+        mergedHeaders.Authorization = `Bearer ${backendBearerToken}`;
       }
 
       const fetchInit = {
@@ -53343,6 +53358,11 @@ button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.45;cur
           <input type="text" id="mo-bridgeUrl" value="${escapeAttr(s.bridgeUrl)}" placeholder="http://localhost:28080">
         </div>
         <div class="mo-row">
+          <label>Backend Bearer Token</label>
+          <input type="password" id="mo-backendBearerToken" value="${escapeAttr(s.backendBearerToken || "")}" placeholder="Cloudflare 배포에만 필요" autocomplete="off">
+          <small>로컬 MariaDB backend가 인증을 요구하지 않으면 비워 두세요.</small>
+        </div>
+        <div class="mo-row">
           <label>${t('settings.label.webDirectBridgeEnabled')}</label>
           <div class="mo-chk">
             <input type="checkbox" id="mo-webDirectBridgeEnabled"${s.webDirectBridgeEnabled === true ? " checked" : ""}>
@@ -54339,6 +54359,7 @@ button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.45;cur
       async function withUiBridgeSettings(fn) {
         const bridgeSettings = {
           bridgeUrl: sanitizeBridgeUrl(((($("mo-bridgeUrl") || {}).value) || "").trim() || settings.bridgeUrl),
+          backendBearerToken: String(((($("mo-backendBearerToken") || {}).value) || settings.backendBearerToken || "")).trim(),
           requestTimeoutMs: getCurrentUiRequestTimeoutMs(),
           webDirectBridgeEnabled: !!(($("mo-webDirectBridgeEnabled") || {}).checked),
         };
@@ -54467,6 +54488,7 @@ button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.45;cur
           const patch = {
             debug: $("mo-debug").checked,
             bridgeUrl: rawBridgeUrl,
+            backendBearerToken: readValue("mo-backendBearerToken", settings.backendBearerToken || "", true),
             webDirectBridgeEnabled: readChecked("mo-webDirectBridgeEnabled", false),
             requestTimeoutMs: $("mo-requestTimeoutMs").value,
             embeddingTimeout: $("mo-embeddingTimeout").value,
@@ -54571,6 +54593,7 @@ button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.45;cur
           }
           // UI 필드를 정규화된 값으로 갱신
           $("mo-bridgeUrl").value = settings.bridgeUrl;
+          $("mo-backendBearerToken").value = settings.backendBearerToken || "";
           $("mo-webDirectBridgeEnabled").checked = settings.webDirectBridgeEnabled === true;
           $("mo-requestTimeoutMs").value = settings.requestTimeoutMs;
           $("mo-embeddingTimeout").value = settings.embeddingTimeout;

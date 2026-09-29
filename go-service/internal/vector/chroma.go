@@ -681,14 +681,15 @@ func statusAllowed(status int, allowed []int) bool {
 }
 
 func chromaWhere(sessionID string, filter string) map[string]any {
+	sessionID, tier, sourceTable := searchFilterValues(sessionID, filter)
 	clauses := []map[string]any{}
-	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+	if sessionID != "" {
 		clauses = append(clauses, map[string]any{"chat_session_id": sessionID})
 	}
-	if tier := tierFromFilter(filter); tier != "" {
+	if tier != "" {
 		clauses = append(clauses, map[string]any{"tier": tier})
 	}
-	if sourceTable := metadataStringEqualityFromFilter(filter, "source_table"); sourceTable != "" {
+	if sourceTable != "" {
 		clauses = append(clauses, map[string]any{"source_table": sourceTable})
 	}
 	switch len(clauses) {
@@ -699,43 +700,6 @@ func chromaWhere(sessionID string, filter string) map[string]any {
 	default:
 		return map[string]any{"$and": clauses}
 	}
-}
-
-func metadataStringEqualityFromFilter(filter, field string) string {
-	original := strings.TrimSpace(filter)
-	lower := strings.ToLower(original)
-	field = strings.ToLower(strings.TrimSpace(field))
-	if original == "" || field == "" {
-		return ""
-	}
-	index := strings.Index(lower, field)
-	if index < 0 {
-		return ""
-	}
-	remainder := strings.TrimSpace(original[index+len(field):])
-	if !strings.HasPrefix(remainder, "==") {
-		return ""
-	}
-	remainder = strings.TrimSpace(strings.TrimPrefix(remainder, "=="))
-	if len(remainder) < 2 || (remainder[0] != '"' && remainder[0] != '\'') {
-		return ""
-	}
-	quote := remainder[0]
-	end := strings.IndexByte(remainder[1:], quote)
-	if end < 0 {
-		return ""
-	}
-	return strings.TrimSpace(remainder[1 : end+1])
-}
-
-func tierFromFilter(filter string) string {
-	lower := strings.ToLower(filter)
-	for _, tier := range []string{"memory", "episode", "chapter", "arc", "saga", "evidence"} {
-		if strings.Contains(lower, "tier") && strings.Contains(lower, tier) {
-			return tier
-		}
-	}
-	return ""
 }
 
 func vectorDocumentFromChroma(id string, text string, meta map[string]any) VectorDocument {

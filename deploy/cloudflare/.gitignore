@@ -1,0 +1,21 @@
+# Rendered deployment config must never be committed; it contains
+# account/resource identifiers supplied by the operator.
+wrangler.toml
+.wrangler/
+
+# Local secrets and tokens.
+.dev.vars
+.env
+.env.*
+
+# Dependencies and build output.
+node_modules/
+dist/
+
+# Logs and scratch state.
+*.log
+*.tmp
+
+# Low-integrity scratch directory for the Worker test runtime.
+# Created by scripts/run-worker-tests.mjs and never meaningful to commit.
+.workerd-temp/

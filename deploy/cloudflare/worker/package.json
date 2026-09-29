@@ -1,0 +1,20 @@
+{
+  "name": "archive-center-cloudflare-worker",
+  "version": "4.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node scripts/run-worker-tests.mjs"
+  },
+  "//install": "Use `npm ci`. The lockfile is committed and complete, and installing from it never resolves the dependency graph, so the npm Arborist crash described below cannot be reached.",
+  "//installWhyLegacyIsNotUsed": "npm 10.9.3 crashes with `Cannot read properties of null (reading 'edgesOut')` while RESOLVING this graph, inside #loadPeerSet. It is an Arborist bug rather than an ERESOLVE the flags could report: vite's optional `@vitejs/devtools` peer pulls `@cloudflare/devtools-vitest`, which asks for `vitest@*`, npm picks vitest 5 as the candidate, and the peer set collapses to a null node. It reproduces with an empty node_modules. Reports: npm/cli#8261, npm/cli#9787.",
+  "//installHowToRegenerate": "Resolution is the step that crashes, so regenerate with a fixed npm rather than with flags: `npx --yes npm@11.20.0 install`. npm 11 resolves the same graph in a few seconds, and the lockfile it writes then installs cleanly under npm 10.9.3. Committing that lockfile is what makes `npm ci` safe for everyone else.",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260815.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "//testCoverage": "19 tests run in real workerd, with D1 bound. The suite runs through scripts/run-worker-tests.mjs because D1 is a disk-backed Durable Object and this repository is Low integrity while the default %TEMP% is Medium; see that script for the full reason."
+}

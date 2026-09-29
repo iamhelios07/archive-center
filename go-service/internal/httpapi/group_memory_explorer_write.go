@@ -1220,7 +1220,7 @@ func (s *Server) deleteMemoryVectorDocument(ctx context.Context, sid string, mem
 		cleanup["skipped_reason"] = "vector_store_not_configured"
 		return cleanup
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		cleanup["skipped_reason"] = "chromadb_endpoint_not_configured"
 		return cleanup
 	}

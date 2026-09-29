@@ -922,6 +922,16 @@ func (d *dualWriteStore) ClaimMemoryVectorOperationsByOperation(ctx context.Cont
 	return nil, ErrNotEnabled
 }
 
+func (d *dualWriteStore) DeferMemoryVectorVisibility(ctx context.Context, id int64, owner string, now, retryAfter time.Time, documentJSON string) error {
+	if primary, ok := d.primary.(MemoryVectorVisibilityPendingStore); ok {
+		return primary.DeferMemoryVectorVisibility(ctx, id, owner, now, retryAfter, documentJSON)
+	}
+	if shadow, ok := d.shadow.(MemoryVectorVisibilityPendingStore); ok {
+		return shadow.DeferMemoryVectorVisibility(ctx, id, owner, now, retryAfter, documentJSON)
+	}
+	return ErrNotEnabled
+}
+
 func (d *dualWriteStore) CompleteMemoryVectorOperation(ctx context.Context, id int64, owner string, now time.Time) error {
 	if primary, ok := d.primary.(MemoryVectorOutboxStore); ok {
 		return primary.CompleteMemoryVectorOperation(ctx, id, owner, now)

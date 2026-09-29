@@ -29,6 +29,10 @@ const (
 	StoreModeFixtureShadow     StoreMode = "fixture_shadow"
 	StoreModeMariaDBReadShadow StoreMode = "mariadb_read_shadow"
 	StoreModeMariaDBAuthority  StoreMode = "mariadb_authority"
+	// StoreModeCloudflareAuthority is a Stage 2 bootstrap selector. Its D1
+	// implementation arrives in Stage 3; it must not be treated as a ready
+	// product authority before the parity gates are complete.
+	StoreModeCloudflareAuthority StoreMode = "cloudflare_authority"
 )
 
 // RuntimeProfile selects the deployment shape for 2.0.1 packages.
@@ -40,6 +44,9 @@ const (
 	RuntimeProfileVectorExternal    RuntimeProfile = "vector_external"
 	RuntimeProfileVectorLocalNative RuntimeProfile = "vector_local_native"
 	RuntimeProfileFullLocal         RuntimeProfile = "full_local"
+	// RuntimeProfileCloudflare selects the Container -> Worker -> D1/Vectorize
+	// deployment shape. It is explicit opt-in and remains unready until parity.
+	RuntimeProfileCloudflare RuntimeProfile = "cloudflare"
 )
 
 // VectorMode selects whether the vector accelerator is disabled, degraded, or
@@ -53,6 +60,8 @@ const (
 	VectorModeLocalNative VectorMode = "local_native"
 	VectorModeLocalProot  VectorMode = "local_proot"
 	VectorModeBundled     VectorMode = "bundled"
+	// VectorModeCloudflare selects the Worker-mediated Vectorize accelerator.
+	VectorModeCloudflare VectorMode = "cloudflare"
 )
 
 // Config holds the entire service configuration.
@@ -82,6 +91,15 @@ type Config struct {
 
 	// MariaDBDSN is used only when StoreMode is a MariaDB-backed mode.
 	MariaDBDSN string
+
+	// CloudflareBridgeURL is the virtual-host Worker bridge endpoint reached by
+	// the Container. It is not a Cloudflare API endpoint and contains no account
+	// or resource identifier.
+	CloudflareBridgeURL string
+
+	// CloudflareBridgeToken is the shared Container-to-Worker bridge secret.
+	// It is loaded only from the environment and never included in String().
+	CloudflareBridgeToken string
 
 	// MariaDBProductReadEnabled marks an explicit R2 product-read proof where
 	// read-only HTTP surfaces are allowed to use MariaDB as their selected
@@ -245,6 +263,8 @@ func Load() Config {
 			cfg.StoreMode = StoreModeMariaDBReadShadow
 		case string(StoreModeMariaDBAuthority):
 			cfg.StoreMode = StoreModeMariaDBAuthority
+		case string(StoreModeCloudflareAuthority):
+			cfg.StoreMode = StoreModeCloudflareAuthority
 		default:
 			cfg.StoreMode = StoreMode(strings.ToLower(v))
 		}
@@ -269,6 +289,8 @@ func Load() Config {
 	}
 
 	cfg.MariaDBDSN = os.Getenv("AC_MARIADB_DSN")
+	cfg.CloudflareBridgeURL = strings.TrimSpace(os.Getenv("AC_CLOUDFLARE_BRIDGE_URL"))
+	cfg.CloudflareBridgeToken = os.Getenv("AC_CLOUDFLARE_BRIDGE_TOKEN")
 	cfg.StoreFixtureDir = os.Getenv("AC_STORE_FIXTURE_DIR")
 	cfg.Readiness.MariaDBConfigured = cfg.MariaDBDSN != ""
 	cfg.ChromaEndpoint = os.Getenv("AC_CHROMA_ENDPOINT")
@@ -358,6 +380,8 @@ func parseRuntimeProfile(raw string) RuntimeProfile {
 		return RuntimeProfileFullLocal
 	case string(RuntimeProfileCoreLite):
 		return RuntimeProfileCoreLite
+	case string(RuntimeProfileCloudflare):
+		return RuntimeProfileCloudflare
 	default:
 		return RuntimeProfile(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -377,6 +401,8 @@ func parseVectorMode(raw string) VectorMode {
 		return VectorModeBundled
 	case string(VectorModeFallback):
 		return VectorModeFallback
+	case string(VectorModeCloudflare):
+		return VectorModeCloudflare
 	default:
 		return VectorMode(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -392,6 +418,8 @@ func defaultVectorMode(profile RuntimeProfile) VectorMode {
 		return VectorModeLocalNative
 	case RuntimeProfileFullLocal:
 		return VectorModeBundled
+	case RuntimeProfileCloudflare:
+		return VectorModeCloudflare
 	default:
 		return VectorModeFallback
 	}
@@ -423,11 +451,11 @@ func (c Config) Validate() error {
 	if err := c.validateProfileVectorPair(); err != nil {
 		return err
 	}
-	if (c.Mode == ModeLive || c.Mode == ModeCutover) && (c.StoreMode != StoreModeMariaDBAuthority || strings.TrimSpace(c.MariaDBDSN) == "") {
-		return fmt.Errorf("config: mode %q requires AC_STORE_MODE=%q and AC_MARIADB_DSN", c.Mode, StoreModeMariaDBAuthority)
+	if (c.Mode == ModeLive || c.Mode == ModeCutover) && c.StoreMode != StoreModeMariaDBAuthority && c.StoreMode != StoreModeCloudflareAuthority {
+		return fmt.Errorf("config: mode %q requires an authoritative store mode (%q or %q)", c.Mode, StoreModeMariaDBAuthority, StoreModeCloudflareAuthority)
 	}
-	if c.StoreMode != StoreModeNoop && c.StoreMode != StoreModeDualShadow && c.StoreMode != StoreModeMariaDBShadow && c.StoreMode != StoreModeFixtureShadow && c.StoreMode != StoreModeMariaDBReadShadow && c.StoreMode != StoreModeMariaDBAuthority {
-		return fmt.Errorf("config: store_mode %q is not allowed in this slice; only %q, %q, %q, %q, %q, and %q are allowed", c.StoreMode, StoreModeNoop, StoreModeDualShadow, StoreModeMariaDBShadow, StoreModeFixtureShadow, StoreModeMariaDBReadShadow, StoreModeMariaDBAuthority)
+	if c.StoreMode != StoreModeNoop && c.StoreMode != StoreModeDualShadow && c.StoreMode != StoreModeMariaDBShadow && c.StoreMode != StoreModeFixtureShadow && c.StoreMode != StoreModeMariaDBReadShadow && c.StoreMode != StoreModeMariaDBAuthority && c.StoreMode != StoreModeCloudflareAuthority {
+		return fmt.Errorf("config: store_mode %q is not allowed", c.StoreMode)
 	}
 	if (c.StoreMode == StoreModeMariaDBShadow || c.StoreMode == StoreModeMariaDBReadShadow || c.StoreMode == StoreModeMariaDBAuthority) && strings.TrimSpace(c.MariaDBDSN) == "" {
 		return fmt.Errorf("config: store_mode %q requires AC_MARIADB_DSN", c.StoreMode)
@@ -437,6 +465,39 @@ func (c Config) Validate() error {
 	}
 	if c.StoreMode == StoreModeFixtureShadow && strings.TrimSpace(c.StoreFixtureDir) == "" {
 		return fmt.Errorf("config: store_mode %q requires AC_STORE_FIXTURE_DIR", c.StoreMode)
+	}
+	if c.RuntimeProfile == RuntimeProfileCloudflare {
+		if c.StoreMode != StoreModeCloudflareAuthority || c.VectorMode != VectorModeCloudflare {
+			return fmt.Errorf("config: runtime_profile %q requires store_mode %q and vector_mode %q", RuntimeProfileCloudflare, StoreModeCloudflareAuthority, VectorModeCloudflare)
+		}
+		if strings.TrimSpace(c.CloudflareBridgeURL) == "" || strings.TrimSpace(c.CloudflareBridgeToken) == "" {
+			return fmt.Errorf("config: runtime_profile %q requires AC_CLOUDFLARE_BRIDGE_URL and AC_CLOUDFLARE_BRIDGE_TOKEN", RuntimeProfileCloudflare)
+		}
+		// Operator routes are reachable from the internet on this profile and
+		// nowhere else. A local installation listens on loopback or a LAN the
+		// operator chose; a Cloudflare Container is given a public address by the
+		// platform as the whole point of running it there.
+		//
+		// authMiddleware is a pass-through unless Auth.Enforce is set, and that
+		// default is right for a loopback service and wrong here. Without this,
+		// POST /admin/database-reset answers anyone who asks. The route's own
+		// confirmation token is not a substitute: it is a constant compiled into
+		// the binary and readable in the source, so it prevents a mistyped reset
+		// and authorises nothing.
+		//
+		// This is the difference between a deployment that is merely reachable and
+		// one that is merely defenceless, so it is a startup failure rather than a
+		// warning: an operator who cannot set a token cannot run this profile, and
+		// should be told that here rather than discovering it from an audit log.
+		if !c.Auth.Enforce {
+			return fmt.Errorf("config: runtime_profile %q requires operator authentication; set AC_ENFORCE_AUTH=true and AC_BEARER_TOKEN, because this profile is reachable from the internet", RuntimeProfileCloudflare)
+		}
+		if strings.TrimSpace(c.Auth.BearerToken) == "" {
+			return fmt.Errorf("config: runtime_profile %q requires a non-empty AC_BEARER_TOKEN; an enforced empty token would reject every request including the operator's own", RuntimeProfileCloudflare)
+		}
+	}
+	if c.StoreMode == StoreModeCloudflareAuthority && c.RuntimeProfile != RuntimeProfileCloudflare {
+		return fmt.Errorf("config: store_mode %q requires runtime_profile %q", StoreModeCloudflareAuthority, RuntimeProfileCloudflare)
 	}
 	if c.VectorRequiresEndpoint() && strings.TrimSpace(c.ChromaEndpoint) == "" {
 		return fmt.Errorf("config: vector_mode %q requires AC_CHROMA_ENDPOINT", c.VectorMode)
@@ -455,7 +516,7 @@ func (c Config) Validate() error {
 
 func isAllowedRuntimeProfile(profile RuntimeProfile) bool {
 	switch profile {
-	case RuntimeProfileClientOnly, RuntimeProfileCoreLite, RuntimeProfileVectorExternal, RuntimeProfileVectorLocalNative, RuntimeProfileFullLocal:
+	case RuntimeProfileClientOnly, RuntimeProfileCoreLite, RuntimeProfileVectorExternal, RuntimeProfileVectorLocalNative, RuntimeProfileFullLocal, RuntimeProfileCloudflare:
 		return true
 	default:
 		return false
@@ -464,7 +525,7 @@ func isAllowedRuntimeProfile(profile RuntimeProfile) bool {
 
 func isAllowedVectorMode(mode VectorMode) bool {
 	switch mode {
-	case VectorModeOff, VectorModeFallback, VectorModeExternal, VectorModeLocalNative, VectorModeLocalProot, VectorModeBundled:
+	case VectorModeOff, VectorModeFallback, VectorModeExternal, VectorModeLocalNative, VectorModeLocalProot, VectorModeBundled, VectorModeCloudflare:
 		return true
 	default:
 		return false
@@ -493,8 +554,18 @@ func (c Config) validateProfileVectorPair() error {
 		if c.VectorMode != VectorModeLocalNative && c.VectorMode != VectorModeLocalProot && c.VectorMode != VectorModeBundled {
 			return fmt.Errorf("config: runtime_profile %q requires a local vector mode", c.RuntimeProfile)
 		}
+	case RuntimeProfileCloudflare:
+		if c.VectorMode != VectorModeCloudflare {
+			return fmt.Errorf("config: runtime_profile %q requires vector_mode %q", c.RuntimeProfile, VectorModeCloudflare)
+		}
 	}
 	return nil
+}
+
+// IsCloudflareProfile reports whether this process is configured for the
+// Container-to-Worker Cloudflare topology.
+func (c Config) IsCloudflareProfile() bool {
+	return c.RuntimeProfile == RuntimeProfileCloudflare && c.StoreMode == StoreModeCloudflareAuthority && c.VectorMode == VectorModeCloudflare
 }
 
 // VectorRequiresEndpoint reports whether this profile must have a ChromaDB
@@ -515,12 +586,109 @@ func (c Config) VectorPolicySatisfied() bool {
 	return !c.VectorRequiresEndpoint() || strings.TrimSpace(c.ChromaEndpoint) != ""
 }
 
+// VectorAcceleratorEnabled reports whether this profile is MEANT to run a vector
+// accelerator at all, as opposed to whether one happens to be reachable.
+//
+// The two questions were previously conflated, and they are genuinely different.
+// A core_lite fallback deployment sets neither, and an explicit AC_CHROMA_ENDPOINT
+// left over in its environment must not turn a deliberately index-less
+// deployment into one that claims an index. Readiness and health ask this one;
+// the mutation and recall call sites ask the other.
+func (c Config) VectorAcceleratorEnabled() bool {
+	if c.VectorMode == VectorModeCloudflare {
+		// The Cloudflare profile selects Vectorize as a required part of the
+		// deployment, not as an optional accelerator, so there is no equivalent of
+		// ChromaEnabled falling to false.
+		return true
+	}
+	return c.ChromaEnabled
+}
+
+// VectorAcceleratorConfigured reports whether this process has a REACHABLE vector
+// accelerator, whichever one the selected profile names.
+//
+// This exists because a dozen call sites had grown their own private answer to
+// the same question, and they did not agree:
+//
+//	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" { /* vector unavailable */ }
+//
+// That test reads as "is a vector accelerator configured?" but it actually asks
+// "is ChromaDB configured?", and on the Cloudflare profile ChromaEndpoint is
+// DELIBERATELY empty — the Cloudflare accelerator is Vectorize, reached through
+// the Worker bridge, and Load even asserts that ChromaEnabled stays false in
+// cloudflare vector mode. Every one of those sites would have reported the
+// vector accelerator unavailable on a deployment that has one, silently turning
+// semantic recall off: sessions would fall back to lexical fill, a clean upsert
+// would skip, and admin reindex would report nothing to do. None of that
+// announces itself as a missing provider.
+//
+// The predicate answers the provider-agnostic question instead, and each call
+// site keeps asking about the thing it actually needs — an endpoint, a
+// collection name, a probe — rather than about a provider it may not be running.
+func (c Config) VectorAcceleratorConfigured() bool {
+	if c.VectorMode == VectorModeCloudflare {
+		// The bridge URL and token are the accelerator's credentials here. The
+		// Cloudflare profile validation already refuses to start without both, so
+		// reaching this with an empty value means the process is misconfigured and
+		// should degrade honestly rather than assume a working accelerator.
+		return strings.TrimSpace(c.CloudflareBridgeURL) != "" && strings.TrimSpace(c.CloudflareBridgeToken) != ""
+	}
+	return strings.TrimSpace(c.ChromaEndpoint) != ""
+}
+
+// VectorAcceleratorName returns the stable, account-neutral label of the
+// configured vector accelerator, for health and readiness reporting.
+//
+// It is a label, not an address: it never contains an endpoint URL, a collection
+// name, an index name, or any credential, because those values are rendered into
+// operator-facing diagnostics.
+func (c Config) VectorAcceleratorName() string {
+	if c.VectorMode == VectorModeCloudflare {
+		return "vectorize"
+	}
+	if strings.TrimSpace(c.ChromaEndpoint) != "" {
+		return "chromadb"
+	}
+	return ""
+}
+
+// VectorAcceleratorSelected returns the accelerator family this deployment is
+// BUILT AROUND, whether or not one is currently reachable.
+//
+// It is deliberately separate from VectorAcceleratorName, which answers "can this
+// process reach its accelerator now". The recall trace names the engine the
+// product uses even while it is running a bounded read shadow with nothing
+// reachable, because that label is the product's answer to "which index is this
+// system for", not a claim that a process is connected to one. Collapsing the two
+// would blank that label in read-shadow mode, and — worse — would let a read
+// shadow be reported as a live read.
+//
+// It returns "vectorize" only for the Cloudflare profile and "chromadb"
+// otherwise, because the local runtime is MariaDB with ChromaDB and the Cloudflare
+// runtime is D1 with Vectorize. A profile that has switched neither is still a
+// MariaDB deployment, so naming ChromaDB is the truthful answer, not a default.
+func (c Config) VectorAcceleratorSelected() string {
+	if c.IsCloudflareProfile() || c.VectorMode == VectorModeCloudflare {
+		return "vectorize"
+	}
+	return "chromadb"
+}
+
 // IsLiveCutoverAllowed is the runtime guard for product-mode execution.
+// MariaDB and Cloudflare are both canonical authority deployments; each has a
+// distinct, explicit connectivity contract.
 func (c Config) IsLiveCutoverAllowed() bool {
-	return (c.Mode == ModeLive || c.Mode == ModeCutover) &&
-		c.StoreMode == StoreModeMariaDBAuthority &&
-		strings.TrimSpace(c.MariaDBDSN) != "" &&
-		c.VectorPolicySatisfied()
+	if c.Mode != ModeLive && c.Mode != ModeCutover {
+		return false
+	}
+	switch c.StoreMode {
+	case StoreModeMariaDBAuthority:
+		return strings.TrimSpace(c.MariaDBDSN) != "" && c.VectorPolicySatisfied()
+	case StoreModeCloudflareAuthority:
+		return c.IsCloudflareProfile() && c.VectorAcceleratorConfigured()
+	default:
+		return false
+	}
 }
 
 // String returns a redacted string representation safe for logs.

@@ -123,7 +123,7 @@ func (s *Server) handleSessionStitch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) stitchBodyTrackingConfig(result *store.SessionStitchResult) error {
 	s.RuntimeConfigMu.Lock()
 	defer s.RuntimeConfigMu.Unlock()
-	settings, err := readBodyTrackingSettings()
+	settings, err := s.readBodyTrackingSettings()
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func (s *Server) stitchBodyTrackingConfig(result *store.SessionStitchResult) err
 		}
 	}
 	settings.Sessions[result.TargetSessionID] = combined
-	return writeBodyTrackingSettings(settings)
+	return s.writeBodyTrackingSettings(settings)
 }
 
 func (s *Server) handleSessionMigratePreview(w http.ResponseWriter, r *http.Request) {
@@ -596,7 +596,7 @@ func (s *Server) handleSessionMigrateReindex(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		resp.Blocked = true
 		resp.BlockedReasons = append(resp.BlockedReasons, "chroma_endpoint_not_configured")
 		writeJSON(w, http.StatusOK, resp)
@@ -1194,7 +1194,7 @@ func (s *Server) handleSessionMigrateRollback(w http.ResponseWriter, r *http.Req
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
-		if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+		if !s.Cfg.VectorAcceleratorConfigured() {
 			resp.Blocked = true
 			resp.BlockedReasons = append(resp.BlockedReasons, "chroma_endpoint_not_configured")
 			writeJSON(w, http.StatusOK, resp)
@@ -1354,7 +1354,7 @@ func (s *Server) handleSessionMigrateCleanupSource(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		resp.Blocked = true
 		resp.ReadyForCleanup = false
 		resp.BlockedReasons = append(resp.BlockedReasons, "chroma_endpoint_not_configured")
@@ -1760,7 +1760,7 @@ func (s *Server) sessionMigrationPreviewChroma(ctx context.Context, sourceID, ta
 		WriteAttempted:      false,
 		RequiredForComplete: true,
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		out.Status = "shadow"
 		out.Errors = append(out.Errors, "chroma_endpoint_not_configured: complete migration will require ChromaDB")
 	}

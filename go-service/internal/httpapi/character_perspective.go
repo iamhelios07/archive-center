@@ -14,7 +14,7 @@ import (
 
 func resolvePrepareTurnPerspectiveIdentity(
 	ctx context.Context,
-	candidateStore store.Store,
+	resolver store.UniqueActiveEntitySurfaceResolver,
 	sid string,
 	perspectiveContext map[string]any,
 ) map[string]any {
@@ -25,8 +25,7 @@ func resolvePrepareTurnPerspectiveIdentity(
 	delete(out, "current_pov_entity_id")
 	out["identity_state"] = "unobserved"
 	surfaceKey := comparableEntityKey(extractionStringFromAny(out["current_pov"]))
-	resolver, ok := candidateStore.(store.UniqueActiveEntitySurfaceResolver)
-	if !ok {
+	if resolver == nil {
 		out["identity_state"] = "resolver_unavailable"
 		return out
 	}

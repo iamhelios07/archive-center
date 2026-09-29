@@ -585,7 +585,7 @@ func (s *Server) runAdminReindexJob(ctx context.Context, sid string, req map[str
 	contextMemoryEmbeddings := map[string]string(nil)
 	contextMemoryErr := error(nil)
 	if !dryRun && cfg.Embedder.hasConfig() && usesVoyageContextualizedEmbedding(cfg.Embedder) {
-		derivedNeedsEmbedding := s.Vector != nil && strings.TrimSpace(s.Cfg.ChromaEndpoint) != ""
+		derivedNeedsEmbedding := s.Vector != nil && s.Cfg.VectorAcceleratorConfigured()
 		// Canonical admission constructs its own public-only contextual chunks.
 		// World rules remain an independent tier and are embedded without replaying
 		// raw user/assistant chat logs into the administrator's Voyage request.
@@ -598,7 +598,7 @@ func (s *Server) runAdminReindexJob(ctx context.Context, sid string, req map[str
 		replayProcessed, replayCompleted, replayVectorQueued, replaySkipped, replayFailed, replayErrors :=
 			s.replayAdminCanonicalMemories(
 				ctx, cfg, canonicalCandidates,
-				s.Vector != nil && strings.TrimSpace(s.Cfg.ChromaEndpoint) != "",
+				s.Vector != nil && s.Cfg.VectorAcceleratorConfigured(),
 				progress, totalCandidates,
 			)
 		processed += replayProcessed
@@ -849,7 +849,7 @@ func (s *Server) adminReindexIntegrityReport(ctx context.Context, sid string, me
 		}
 	}
 
-	vectorConfigured := s != nil && s.Vector != nil && strings.TrimSpace(s.Cfg.ChromaEndpoint) != ""
+	vectorConfigured := s != nil && s.Vector != nil && s.Cfg.VectorAcceleratorConfigured()
 	vectorStatus := "not_configured"
 	vectorCount := 0
 	vectorCountKnown := false

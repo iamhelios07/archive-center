@@ -193,7 +193,7 @@ func (s *Server) commitAcceptedMemoryAdmission(
 	}
 
 	vectors := []store.MemoryAdmissionVector{}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) != "" {
+	if s.Cfg.VectorAcceleratorConfigured() {
 		if publicProjection.Eligible && memory != nil && strings.TrimSpace(searchText) != "" {
 			languageMeta := memoryVectorLanguageMetadata(*memory)
 			vectors = append(vectors, store.MemoryAdmissionVector{

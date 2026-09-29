@@ -310,6 +310,23 @@ func TestValidateAllowsLiveAndCutoverWithMariaDBAuthority(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsLiveAndCutoverWithCloudflareAuthority(t *testing.T) {
+	for _, mode := range []Mode{ModeLive, ModeCutover} {
+		cfg := Default()
+		cfg.Mode = mode
+		cfg.RuntimeProfile = RuntimeProfileCloudflare
+		cfg.StoreMode = StoreModeCloudflareAuthority
+		cfg.VectorMode = VectorModeCloudflare
+		cfg.CloudflareBridgeURL = "https://archive-center-bridge.invalid"
+		cfg.CloudflareBridgeToken = "bridge-token"
+		cfg.Auth.Enforce = true
+		cfg.Auth.BearerToken = "operator-token"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() should allow mode %q with Cloudflare authority: %v", mode, err)
+		}
+	}
+}
+
 func TestValidateAllowsShadow(t *testing.T) {
 	cfg := Default()
 	cfg.Mode = ModeShadow
@@ -410,6 +427,24 @@ func TestIsLiveCutoverAllowed(t *testing.T) {
 	}
 }
 
+func TestIsLiveCutoverAllowedCloudflareAuthority(t *testing.T) {
+	cfg := Default()
+	cfg.Mode = ModeLive
+	cfg.RuntimeProfile = RuntimeProfileCloudflare
+	cfg.StoreMode = StoreModeCloudflareAuthority
+	cfg.VectorMode = VectorModeCloudflare
+	cfg.CloudflareBridgeURL = "https://archive-center-bridge.invalid"
+	cfg.CloudflareBridgeToken = "bridge-token"
+
+	if !cfg.IsLiveCutoverAllowed() {
+		t.Error("IsLiveCutoverAllowed() should be true for a configured Cloudflare authority deployment")
+	}
+	cfg.CloudflareBridgeToken = ""
+	if cfg.IsLiveCutoverAllowed() {
+		t.Error("IsLiveCutoverAllowed() should reject Cloudflare authority without bridge credentials")
+	}
+}
+
 func TestLoadModeCaseInsensitive(t *testing.T) {
 	t.Setenv("AC_MODE", "SHADOW")
 	cfg := Load()
@@ -443,6 +478,125 @@ func TestLoadUnknownModeFallsBack(t *testing.T) {
 	cfg := Load()
 	if cfg.Mode != ModeShadow {
 		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeShadow)
+	}
+}
+
+func TestValidateBlocksCloudflareProfileWithoutBridgeURL(t *testing.T) {
+	cfg := Default()
+	cfg.RuntimeProfile = RuntimeProfileCloudflare
+	cfg.StoreMode = StoreModeCloudflareAuthority
+	cfg.VectorMode = VectorModeCloudflare
+	cfg.CloudflareBridgeToken = "bridge-token"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() should reject cloudflare profile without bridge URL")
+	}
+}
+
+func TestValidateBlocksCloudflareProfileWithoutBridgeToken(t *testing.T) {
+	cfg := Default()
+	cfg.RuntimeProfile = RuntimeProfileCloudflare
+	cfg.StoreMode = StoreModeCloudflareAuthority
+	cfg.VectorMode = VectorModeCloudflare
+	cfg.CloudflareBridgeURL = "http://archive-center-bridge.internal"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() should reject cloudflare profile without bridge token")
+	}
+}
+
+func TestValidateBlocksCloudflareProfileWithWrongStoreMode(t *testing.T) {
+	cfg := Default()
+	cfg.RuntimeProfile = RuntimeProfileCloudflare
+	cfg.StoreMode = StoreModeNoop
+	cfg.VectorMode = VectorModeCloudflare
+	cfg.CloudflareBridgeURL = "http://archive-center-bridge.internal"
+	cfg.CloudflareBridgeToken = "bridge-token"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() should reject cloudflare runtime profile without cloudflare_authority store mode")
+	}
+}
+
+func TestValidateBlocksCloudflareProfileWithWrongVectorMode(t *testing.T) {
+	cfg := Default()
+	cfg.RuntimeProfile = RuntimeProfileCloudflare
+	cfg.StoreMode = StoreModeCloudflareAuthority
+	cfg.VectorMode = VectorModeBundled
+	cfg.CloudflareBridgeURL = "http://archive-center-bridge.internal"
+	cfg.CloudflareBridgeToken = "bridge-token"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() should reject cloudflare runtime profile without cloudflare vector mode")
+	}
+}
+
+func TestValidateBlocksCloudflareStoreModeWithoutCloudflareProfile(t *testing.T) {
+	cfg := Default()
+	cfg.RuntimeProfile = RuntimeProfileCoreLite
+	cfg.StoreMode = StoreModeCloudflareAuthority
+	cfg.VectorMode = VectorModeCloudflare
+	cfg.CloudflareBridgeURL = "http://archive-center-bridge.internal"
+	cfg.CloudflareBridgeToken = "bridge-token"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() should reject cloudflare_authority store mode outside the cloudflare runtime profile")
+	}
+}
+
+func TestValidateBlocksCloudflareVectorModeOutsideCloudflareProfile(t *testing.T) {
+	cfg := Default()
+	cfg.RuntimeProfile = RuntimeProfileFullLocal
+	cfg.StoreMode = StoreModeMariaDBAuthority
+	cfg.MariaDBDSN = "user:pass@tcp(localhost:3306)/ac"
+	cfg.VectorMode = VectorModeCloudflare
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() should reject cloudflare vector mode outside the cloudflare runtime profile")
+	}
+}
+
+func TestLoadCloudflareProfile(t *testing.T) {
+	t.Setenv("AC_RUNTIME_PROFILE", "cloudflare")
+	t.Setenv("AC_STORE_MODE", "cloudflare_authority")
+	t.Setenv("AC_CLOUDFLARE_BRIDGE_URL", "http://archive-center-bridge.internal")
+	t.Setenv("AC_CLOUDFLARE_BRIDGE_TOKEN", "bridge-token")
+	// The Cloudflare profile is the one deployment shape that is reachable from
+	// the internet, so it is the one shape that must not run without operator
+	// authentication. authMiddleware is a pass-through when this is unset, which
+	// would leave POST /admin/database-reset answering anyone who asked.
+	t.Setenv("AC_ENFORCE_AUTH", "true")
+	t.Setenv("AC_BEARER_TOKEN", "operator-token")
+
+	cfg := Load()
+
+	if cfg.RuntimeProfile != RuntimeProfileCloudflare {
+		t.Errorf("RuntimeProfile = %q, want %q", cfg.RuntimeProfile, RuntimeProfileCloudflare)
+	}
+	if cfg.StoreMode != StoreModeCloudflareAuthority {
+		t.Errorf("StoreMode = %q, want %q", cfg.StoreMode, StoreModeCloudflareAuthority)
+	}
+	if cfg.VectorMode != VectorModeCloudflare {
+		t.Errorf("VectorMode = %q, want %q", cfg.VectorMode, VectorModeCloudflare)
+	}
+	if !cfg.IsCloudflareProfile() {
+		t.Error("IsCloudflareProfile() should be true for the fully selected cloudflare profile")
+	}
+	if cfg.ChromaEnabled {
+		t.Error("ChromaEnabled should stay false in cloudflare vector mode; Vectorize is reached through the bridge")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() should allow the explicit cloudflare profile: %v", err)
+	}
+	if strings.Contains(cfg.String(), "bridge-token") {
+		t.Error("String() must never include the Cloudflare bridge token")
+	}
+}
+
+func TestLoadCloudflareProfileDefaultsToCloudflareVectorMode(t *testing.T) {
+	t.Setenv("AC_RUNTIME_PROFILE", "cloudflare")
+	t.Setenv("AC_STORE_MODE", "cloudflare_authority")
+	t.Setenv("AC_CLOUDFLARE_BRIDGE_URL", "http://archive-center-bridge.internal")
+	t.Setenv("AC_CLOUDFLARE_BRIDGE_TOKEN", "bridge-token")
+
+	cfg := Load()
+
+	if cfg.VectorMode != VectorModeCloudflare {
+		t.Errorf("VectorMode = %q, want %q", cfg.VectorMode, VectorModeCloudflare)
 	}
 }
 

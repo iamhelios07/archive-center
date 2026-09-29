@@ -28,7 +28,7 @@ func (s *Server) indexStatusSchemaProposal(ctx context.Context, proposal store.S
 		out.Reason = "vector_not_configured"
 		return out
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		out.Reason = "chroma_endpoint_not_configured"
 		return out
 	}
@@ -107,7 +107,7 @@ func (s *Server) indexStatusSchemaDefinition(ctx context.Context, definition sto
 		out.Reason = "vector_not_configured"
 		return out
 	}
-	if strings.TrimSpace(s.Cfg.ChromaEndpoint) == "" {
+	if !s.Cfg.VectorAcceleratorConfigured() {
 		out.Reason = "chroma_endpoint_not_configured"
 		return out
 	}
