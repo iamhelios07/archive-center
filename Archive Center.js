@@ -5461,7 +5461,6 @@
     } catch (err) {
       debugLog("[unload] turn workflow HUD cleanup failed:", err && err.message);
     }
-    stopBridgeWarmup();
     if (!R) return;
     try {
       if (typeof R.removeRisuScriptHandler === "function") {
@@ -5495,9 +5494,6 @@
 
   async function registerRisuLifecycleHooks() {
     if (!R) return;
-    // 예열은 등록과 함께 시작한다. 컨테이너가 이미 잠든 상태로 앱을 열어도
-    // 이후 heartbeat로 깨어 있고, 턴 시작 예열이 그 첫 요청을 담당한다.
-    startBridgeWarmup();
     await registerMemoryTransportBodyInterceptor();
     try {
       if (typeof R.addRisuScriptHandler === "function") {
@@ -14612,77 +14608,6 @@
       return null;
     } finally {
       if (timeoutTimer !== null) clearTimeout(timeoutTimer);
-    }
-  }
-
-  // ──────────────────────────────────────────────────────────────
-  // [BRIDGE WARMUP]
-  // Cloudflare Container는 유휴가 지나면 인스턴스를 sleep시킨다(sleepAfter).
-  // 재기동은 수십 초가 걸릴 수 있고, 그 지연은 사용자의 첫 턴 전체에 그대로
-  // 나타난다. 재기동 시간을 줄이는 대신 재기동 자체를 없애는 편이 확실하다.
-  //
-  // 주기 호출은 플러그인이 살아 있는 동안에만 울린다. RisuAI를 닫으면 핑이
-  // 끊기고, sleepAfter가 지나면 컨테이너가 잠들어 과금도 멈춘다. 비용은 실제
-  // 사용 시간에 비례한다.
-  //
-  // /ready가 아니라 /health를 쓴다. /ready는 D1·Vectorize까지 확인해 1초가
-  // 넘게 걸리는 전체 의존성 검사이고, 예열 목적에는 프로세스 생존 여부만
-  // 확인하면 충분하다.
-  const BRIDGE_WARMUP_INTERVAL_MS = 4 * 60 * 1000;
-  // 턴 시작 예열이 직전 heartbeat와 겹쳐 두 번 부르지 않기 위한 창이다.
-  // heartbeat 주기보다 훨씬 짧으므로, 이 창 안에 heartbeat가 있었다면
-  // 컨테이너는 분명 깨어 있다.
-  const BRIDGE_WARMUP_COOLDOWN_MS = 90 * 1000;
-  const BRIDGE_WARMUP_TIMEOUT_MS = 5000;
-  let _bridgeWarmupTimer = null;
-  let _bridgeLastWarmupAt = 0;
-  let _bridgeWarmupInFlight = false;
-
-  function bridgeWarmupEligible(cfg) {
-    const s = cfg || settings;
-    if (!s || s.enabled === false) return false;
-    return isValidBridgeUrlInput(sanitizeBridgeUrl(s.bridgeUrl || ""));
-  }
-
-  /**
-   * 컨테이너가 깨어 있는지 한 번 확인한다.
-   * force=false면 최근 호출이 있으면 생략하므로, 턴 시작 예열과 heartbeat가
-   * 같은 인스턴스를 중복해서 깨우지 않는다.
-   */
-  async function warmUpBridgeIfNeeded(force) {
-    if (_bridgeWarmupInFlight || !bridgeWarmupEligible(settings)) return false;
-    if (!force && (Date.now() - _bridgeLastWarmupAt) < BRIDGE_WARMUP_COOLDOWN_MS) return false;
-    _bridgeWarmupInFlight = true;
-    try {
-      const result = await bridgeFetch("/health", {
-        method: "GET",
-        timeoutMs: BRIDGE_WARMUP_TIMEOUT_MS,
-      });
-      if (result) {
-        _bridgeLastWarmupAt = Date.now();
-        return true;
-      }
-      return false;
-    } catch (warmErr) {
-      warnLog("bridge warmup failed:", warmErr && warmErr.message);
-      return false;
-    } finally {
-      _bridgeWarmupInFlight = false;
-    }
-  }
-
-  function startBridgeWarmup() {
-    stopBridgeWarmup();
-    if (typeof setInterval !== "function" || !bridgeWarmupEligible(settings)) return;
-    _bridgeWarmupTimer = setInterval(function() {
-      warmUpBridgeIfNeeded(true);
-    }, BRIDGE_WARMUP_INTERVAL_MS);
-  }
-
-  function stopBridgeWarmup() {
-    if (_bridgeWarmupTimer !== null) {
-      clearInterval(_bridgeWarmupTimer);
-      _bridgeWarmupTimer = null;
     }
   }
 
@@ -34678,9 +34603,6 @@
       debugLog("beforeRequest hook fired, type:", type);
       clearArchiveCenterRecomposerBridge();
       if (!settings.enabled || !isSaveType(type)) return payload;
-      // 턴이 시작되면 백엔드가 반드시 응답해야 한다. 컨테이너가 잠들어 있으면
-      // 그 지연이 턴 전체에 붙으므로, heartbeat 주기와 무관하게 여기서 보장한다.
-      await warmUpBridgeIfNeeded(false);
 
       recordHostDiagnostic({stage: "before_request", kind: "host_observation_started"});
       const extractedMessages = extractMessages(payload);
