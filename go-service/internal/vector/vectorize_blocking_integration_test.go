@@ -42,7 +42,7 @@ func TestCloudflareVectorizeRemoteBlockingFacade(t *testing.T) {
 	}()
 
 	doc := VectorDocument{
-		ID: id, Embedding: remoteTestVector(3, remoteBlockingIntegrationDimensions(t)), ChatSessionID: sessionID,
+		ID: id, Embedding: remoteBlockingTestVector(3, remoteBlockingIntegrationDimensions(t)), ChatSessionID: sessionID,
 		Tier: "memory", SourceTable: "memories", SourceRowID: "1", DocumentText: "remote blocking facade probe",
 	}
 	if err := store.Upsert(ctx, sessionID, []VectorDocument{doc}); err != nil {
@@ -55,6 +55,17 @@ func TestCloudflareVectorizeRemoteBlockingFacade(t *testing.T) {
 	if len(readback) != 1 || readback[0].DocumentText != doc.DocumentText {
 		t.Fatalf("GetDocuments after successful blocking Upsert = %#v, want %q", readback, doc.DocumentText)
 	}
+}
+
+func remoteBlockingTestVector(seed, dimensions int) []float32 {
+	if dimensions <= 0 {
+		dimensions = 1
+	}
+	out := make([]float32, dimensions)
+	for i := range out {
+		out[i] = float32((i%17)+1+seed) / 32
+	}
+	return out
 }
 
 func remoteBlockingIntegrationDimensions(t *testing.T) int {
