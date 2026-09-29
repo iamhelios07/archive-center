@@ -21,7 +21,11 @@ binding = "DB"
 database_name = "archive-center-db"
 # database_id is account-specific and must be rendered at deploy time.
 
-[vectorize]
+# NOTE: [[vectorize]] is an ARRAY of tables, like [[d1_databases]] above. The
+# object form ([vectorize]) is valid TOML and wrangler rejects it with
+# `The field "vectorize" should be an array but got {...}`, so a plain TOML
+# parser validating this file will not catch the mistake.
+[[vectorize]]
 binding = "VECTORIZE"
 index_name = "archive-center-vectors"
 # Vectorize index IDs are account-specific and must be rendered at deploy time.

@@ -156,6 +156,42 @@ explicit `--dimensions`.
 **Record both identifiers.** The D1 output prints a `database_id`; use the index
 name for Vectorize.
 
+### Create the metadata indexes — before you store anything
+
+**Do this now, not later.** Vectorize can only filter on a metadata property that
+has been indexed, and **vectors inserted before that index exists are permanently
+invisible to filtered queries** — they still appear in an unfiltered query, but no
+filter can find them. Measured against a real index: two vectors inserted before
+`session_id` was indexed returned 0 matches forever, while a third, inserted
+after, matched immediately.
+
+Recall filters on every query, so this is the difference between working recall
+and silently empty recall.
+
+```bash
+npx wrangler vectorize create-metadata-index archive-center-vectors --propertyName=chat_session_id --type=string
+npx wrangler vectorize create-metadata-index archive-center-vectors --propertyName=tier --type=string
+npx wrangler vectorize create-metadata-index archive-center-vectors --propertyName=source_table --type=string
+```
+
+`chat_session_id` is the one that matters most: every recall query filters on it,
+so without this index **the vector path returns nothing at all**, while `/ready`
+still reports `vectorize` as bound. There is no error to notice.
+
+Check, and wait for it to appear:
+
+```bash
+npx wrangler vectorize list-metadata-index archive-center-vectors
+```
+
+Creation is enqueued, like every Vectorize mutation. Propagation was measured in
+tens of seconds, so a filter that matches nothing immediately after this step may
+simply be too early to tell.
+
+**If you already stored vectors before reading this**, they cannot be made
+filterable afterwards. Re-insert them: the canonical rows are in D1, so a reindex
+rebuilds the index, and this time the filters will see them.
+
 Check what now exists:
 
 ```bash

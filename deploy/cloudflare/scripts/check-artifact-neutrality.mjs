@@ -27,7 +27,7 @@
 //   node deploy/cloudflare/scripts/check-artifact-neutrality.mjs --dir path
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +38,33 @@ const SKIPPED_DIRECTORIES = new Set(["node_modules", ".wrangler", ".workerd-temp
 
 /** Files whose whole purpose is to contain the caller's own values. */
 const SELF_EXEMPT = new Set([resolve(deployRoot, "scripts", "render-wrangler-config.mjs")]);
+
+/**
+ * Paths this project gitignores ON PURPOSE because they are supposed to hold
+ * account-scoped values.
+ *
+ * The scanner walks the filesystem rather than `git ls-files`, so it sees these
+ * and reports them — and a rendered `wrangler.toml` legitimately contains the
+ * database id, which made `render-wrangler-config.mjs` followed by this check
+ * fail by design. A guard that blocks the documented deploy procedure gets
+ * switched off, so the exclusion is stated instead.
+ *
+ * Only names that the deploy flow itself creates or expects are listed. Anything
+ * else that appears in this directory is still scanned, untracked or not, because
+ * an unexpected file holding a credential is exactly the case worth catching.
+ */
+const DEPLOY_IGNORED_BASENAMES = new Set([
+  "wrangler.toml", // rendered from the template at deploy time
+  "wrangler.toml.bak",
+  ".dev.vars", // wrangler dev secrets
+  ".env",
+]);
+
+function isDeliberatelyIgnored(basename) {
+  if (DEPLOY_IGNORED_BASENAMES.has(basename)) return true;
+  // .env.local, .env.cloudflare.local — the family the repository gitignores.
+  return basename.startsWith(".env.");
+}
 
 const RULES = [
   {
@@ -125,6 +152,7 @@ const findings = [];
 
 for (const file of files) {
   if (SELF_EXEMPT.has(file)) continue;
+  if (isDeliberatelyIgnored(basename(file))) continue;
   const contents = readFileSync(file, "utf8");
   const lines = contents.split(/\r?\n/);
   for (const rule of RULES) {
