@@ -339,6 +339,7 @@ registry and reference it. Either way it needs these variables:
 | `AC_VECTOR_MODE` | `cloudflare` |
 | `AC_CLOUDFLARE_BRIDGE_URL` | the Worker URL from step 4 |
 | `AC_CLOUDFLARE_BRIDGE_TOKEN` | the same value as `BRIDGE_TOKEN` |
+| `AC_MODE` | `live` — the gateway supplies this for the production D1 authority deployment |
 | `AC_ENFORCE_AUTH` | `true` |
 | `AC_BEARER_TOKEN` | an operator token you choose — **not** the bridge token |
 | `AC_BIND_ADDR` | `0.0.0.0:28080` — already the image default |
@@ -374,26 +375,23 @@ layer that gets pushed, cached and pulled.
 curl -H "Authorization: Bearer $AC_BEARER_TOKEN" https://<your-container>/ready
 ```
 
-**Expect HTTP 503 at this point, and that is not a failure.** Every key in the
-body is the useful part:
+**Expect HTTP 200.** The readiness endpoint evaluates actual configuration and
+runtime dependencies; it is not a bootstrap placeholder.
 
 ```json
 {
+  "ready": true,
   "checks": {
-    "cloudflare_profile": "bootstrap_only",
-    "cloudflare_parity": "incomplete",
-    "ready_blocker": "cloudflare_parity_incomplete",
     "cloudflare_bridge": "configured",
     "store_capabilities": "<N>/<N>",
     "vector_accelerator": "vectorize",
     "vector_engine_policy": "vectorize_required",
     "vector_accelerator_reachable": "vectorize",
-    "turn_preparation_settings": "durable"
+    "turn_preparation_settings": "durable",
+    "product_mode": "active"
   }
 }
 ```
-
-What each one tells you:
 
 | Key | What you want to see |
 | --- | --- |
@@ -402,13 +400,11 @@ What each one tells you:
 | `vector_accelerator_reachable` | `vectorize` — the one reachable **right now** |
 | `turn_preparation_settings` | `durable` — settings are in D1, not in a layer that will be discarded |
 | `store_capabilities` | both sides equal. If they differ, `store_capabilities_missing` names what is absent |
-| `cloudflare_profile` | `bootstrap_only` |
+| `product_mode` | `active` — gateway supplied `AC_MODE=live` and the D1 authority profile passed its runtime guard |
 
-`cloudflare_profile: bootstrap_only` with `ready_blocker:
-cloudflare_parity_incomplete` means the profile is not yet declared a
-functional-parity deployment. The service runs and serves; it refuses to report
-itself ready. That is the current intended state, and the 503 is the same fact
-expressed as a status code — so do not read it as a broken deployment.
+A `503` now indicates an actual blocker, such as `store_open_error` or a
+required unavailable vector endpoint; inspect `ready_blocker` and correct that
+dependency before accepting traffic.
 
 If a startup message names a dependency, it names the real one:
 `cloudflare vectorize startup preflight failed (bridge=…)` means the bridge, not a

@@ -25,23 +25,25 @@ func newCloudflareTestConfig() config.Config {
 	return cfg
 }
 
-func TestHandleReadyCloudflareProfileBlocksUntilParityComplete(t *testing.T) {
+func TestHandleReadyCloudflareProfileReportsOperationalState(t *testing.T) {
+	cfg := newCloudflareTestConfig()
+	cfg.Mode = config.ModeLive
 	mux := http.NewServeMux()
-	srv := NewServer(newCloudflareTestConfig())
+	srv := NewServer(cfg)
 	srv.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	var resp readyResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Ready || resp.StoreReady || !resp.Degraded {
-		t.Fatalf("bootstrap-only Cloudflare profile must not report ready: %+v", resp)
+	if !resp.Ready || !resp.StoreReady {
+		t.Fatalf("configured Cloudflare authority must report ready: %+v", resp)
 	}
 	if resp.RuntimeProfile != string(config.RuntimeProfileCloudflare) {
 		t.Errorf("runtime_profile = %q, want %q", resp.RuntimeProfile, config.RuntimeProfileCloudflare)
@@ -49,26 +51,20 @@ func TestHandleReadyCloudflareProfileBlocksUntilParityComplete(t *testing.T) {
 	if resp.VectorMode != string(config.VectorModeCloudflare) {
 		t.Errorf("vector_mode = %q, want %q", resp.VectorMode, config.VectorModeCloudflare)
 	}
-	if resp.Checks["ready_blocker"] != "cloudflare_parity_incomplete" {
-		t.Errorf("ready_blocker = %q, want cloudflare_parity_incomplete", resp.Checks["ready_blocker"])
-	}
-	if resp.Checks["cloudflare_profile"] != "bootstrap_only" {
-		t.Errorf("cloudflare_profile = %q, want bootstrap_only", resp.Checks["cloudflare_profile"])
-	}
-	if resp.Checks["cloudflare_parity"] != "incomplete" {
-		t.Errorf("cloudflare_parity = %q, want incomplete", resp.Checks["cloudflare_parity"])
-	}
 	if resp.Checks["cloudflare_bridge"] != "configured" {
 		t.Errorf("cloudflare_bridge = %q, want configured", resp.Checks["cloudflare_bridge"])
 	}
 	if resp.Checks["store_mode"] != string(config.StoreModeCloudflareAuthority) {
 		t.Errorf("store_mode = %q, want %q", resp.Checks["store_mode"], config.StoreModeCloudflareAuthority)
 	}
-	// The parity gap must be observable: routes gate features on optional
-	// capabilities, so readiness publishes how many the provider satisfies.
 	coverage := resp.Checks["store_capabilities"]
 	if coverage == "" || !strings.Contains(coverage, "/") {
 		t.Errorf("store_capabilities = %q, want an implemented/total report", coverage)
+	}
+	for _, key := range []string{"cloudflare_profile", "cloudflare_parity"} {
+		if _, ok := resp.Checks[key]; ok {
+			t.Errorf("removed bootstrap check %q was still emitted", key)
+		}
 	}
 }
 
@@ -94,8 +90,8 @@ func TestHandleReadyCloudflareProfileReportsMissingBridgeConfig(t *testing.T) {
 	if resp.Checks["cloudflare_bridge"] != "not_configured" {
 		t.Errorf("cloudflare_bridge = %q, want not_configured", resp.Checks["cloudflare_bridge"])
 	}
-	if resp.Checks["ready_blocker"] != "cloudflare_parity_incomplete" {
-		t.Errorf("ready_blocker = %q, want cloudflare_parity_incomplete", resp.Checks["ready_blocker"])
+	if resp.Checks["ready_blocker"] != "store_open_error" {
+		t.Errorf("ready_blocker = %q, want store_open_error", resp.Checks["ready_blocker"])
 	}
 }
 

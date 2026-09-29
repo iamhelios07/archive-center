@@ -12,7 +12,10 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cloudflareRoot = resolve(here, "..");
-const repositoryRoot = resolve(cloudflareRoot, "..");
+// Two levels up: this script lives in deploy/cloudflare/scripts, and the
+// repository root (which holds go-service/ for the Docker build context) is
+// the parent of deploy/.
+const repositoryRoot = resolve(cloudflareRoot, "..", "..");
 const workerRoot = resolve(cloudflareRoot, "worker");
 const gatewayRoot = resolve(cloudflareRoot, "gateway");
 const migrationsRoot = resolve(cloudflareRoot, "migrations");
@@ -58,7 +61,17 @@ function run(command, args, options = {}) {
   });
   if (result.error || result.status !== 0) {
     // Child output can contain account identifiers, image references, URLs, or
-    // service responses. Do not relay it to a terminal, CI log, or report.
+    // service responses. Do not relay it to a terminal, CI log, or report. A
+    // step can opt into a short tail when its output carries no operator data
+    // (e.g. a local Docker build, which never talks to the registry).
+    if (options.errorTail) {
+      const tail = `${result.error?.message ?? ""}\n${result.stdout ?? ""}\n${result.stderr ?? ""}`
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .slice(-6)
+        .join("\n");
+      if (tail !== "") process.stderr.write(`bootstrap-cloudflare: ${options.label} tail:\n${tail}\n`);
+    }
     throw new Error(options.label ?? "child command failed");
   }
   return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
@@ -103,8 +116,10 @@ function wranglerBin() {
 }
 
 function wrangler(args, options = {}) {
+  const env = options.accountID ? accountEnvironment(options.accountID) : (options.env ?? process.env);
   return run(process.execPath, [wranglerBin(), ...args], {
     ...options,
+    env,
     label: options.label ?? "wrangler command",
   });
 }
@@ -136,8 +151,10 @@ function getAccountID() {
   return ids[0];
 }
 
-function accountArgs(accountID, args) {
-  return [...args, "--account-id", accountID];
+// wrangler 4.124 has no global --account-id flag; the account is selected with
+// the CLOUDFLARE_ACCOUNT_ID environment variable, which every command honors.
+function accountEnvironment(accountID) {
+  return { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountID };
 }
 
 function generatedSuffix() {
@@ -174,6 +191,12 @@ function findString(object, keys) {
 }
 
 function requireID(output, label) {
+  // `d1 create` has no --json flag (wrangler rejects unknown arguments), so its
+  // plain output carries the identifier inside a rendered config snippet in
+  // either TOML or JSON shape. A UUID scan handles both; the JSON key path is
+  // the fallback for explicit --json commands.
+  const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(output);
+  if (uuid) return uuid[0];
   const value = findString(parseJSON(output, label), ["uuid", "database_id", "id"]);
   if (value === "") throw new Error(`${label} returned no resource identifier`);
   return value;
@@ -197,26 +220,34 @@ function generatedEnvironment(values) {
 }
 
 function secretPut(config, accountID, name, value) {
-  wrangler(accountArgs(accountID, ["secret", "put", name, "--config", config]), {
+  wrangler(["secret", "put", name, "--config", config], {
+    accountID,
     input: `${value}\n`,
     label: `${name} secret injection`,
   });
 }
 
 async function verifyReadiness(gatewayURL, bearerToken) {
-  const deadline = Date.now() + 120_000;
+  // The first Container start must pull the image from the registry, which can
+  // take longer than a short window; five minutes absorbs a slow first pull.
+  const deadline = Date.now() + 5 * 60_000;
   while (Date.now() < deadline) {
     try {
       const unauthorized = await fetch(`${gatewayURL}/ready`, { redirect: "error" });
       if (unauthorized.status !== 401) throw new Error("gateway did not reject unauthenticated readiness");
-      const authorized = await fetch(`${gatewayURL}/ready`, {
-        headers: { Authorization: `Bearer ${bearerToken}` },
-        redirect: "error",
-      });
-      if (authorized.ok) {
-        notice("authenticated readiness: pass");
-        return;
+      const headers = { Authorization: `Bearer ${bearerToken}` };
+      const authorized = await fetch(`${gatewayURL}/ready`, { headers, redirect: "error" });
+      if (authorized.status !== 200) throw new Error("authenticated readiness did not return 200");
+      // This safe, read-only canonical-store request proves the complete public
+      // path: gateway auth -> Container -> Go -> private bridge -> D1.
+      const sessions = await fetch(`${gatewayURL}/sessions`, { headers, redirect: "error" });
+      if (sessions.status !== 200) throw new Error("canonical store read did not return 200");
+      const body = await sessions.json().catch(() => null);
+      if (!body || typeof body !== "object" || body.status !== "ok" || !Array.isArray(body.sessions)) {
+        throw new Error("canonical store read returned an invalid response");
       }
+      notice("authenticated readiness and canonical store read: pass");
+      return;
     } catch {
       // Container pull and secret propagation are asynchronous. Suppress raw
       // endpoint/service responses because they can include operator data.
@@ -268,26 +299,32 @@ async function main() {
 
   const names = generatedNames();
   const d1Create = runStep("dedicated D1 creation", () =>
-    wrangler(accountArgs(accountID, ["d1", "create", names.database, "--json"]), { label: "D1 creation" }),
+    // No --json here: wrangler rejects unknown arguments in strict mode, and
+    // `d1 create` does not define one. The UUID scan in requireID reads the
+    // plain output instead.
+    wrangler(["d1", "create", names.database], { accountID, label: "D1 creation" }),
   );
   const databaseID = requireID(d1Create, "D1 creation");
   for (const migration of migrationFiles()) {
     runStep(`migration ${migration.split(/[\\/]/).pop()}`, () =>
       // --yes keeps the migration step non-interactive: the spawned process has
       // no TTY, and a confirmation prompt would abort it mid-bootstrap.
-      wrangler(accountArgs(accountID, ["d1", "execute", names.database, "--remote", "--yes", "--file", migration]), {
+      wrangler(["d1", "execute", names.database, "--remote", "--yes", "--file", migration], {
+        accountID,
         label: "D1 migration",
       }),
     );
   }
   runStep("dedicated Vectorize creation", () =>
-    wrangler(accountArgs(accountID, ["vectorize", "create", names.vectorize, "--dimensions", dimension, "--metric", "cosine", "--json"]), {
+    wrangler(["vectorize", "create", names.vectorize, "--dimensions", dimension, "--metric", "cosine", "--json"], {
+      accountID,
       label: "Vectorize creation",
     }),
   );
   for (const property of ["chat_session_id", "tier", "source_table"]) {
     runStep(`Vectorize metadata index ${property}`, () =>
-      wrangler(accountArgs(accountID, ["vectorize", "create-metadata-index", names.vectorize, "--property-name", property, "--type", "string"]), {
+      wrangler(["vectorize", "create-metadata-index", names.vectorize, "--property-name", property, "--type", "string"], {
+        accountID,
         label: "Vectorize metadata index creation",
       }),
     );
@@ -297,10 +334,11 @@ async function main() {
     run("docker", ["build", "--platform", "linux/amd64", "--tag", names.image, "--file", resolve(cloudflareRoot, "container", "Dockerfile"), "."], {
       cwd: repositoryRoot,
       label: "Container image build",
+      errorTail: true,
     }),
   );
   const pushedImage = runStep("Cloudflare Registry push", () => {
-    const output = wrangler(accountArgs(accountID, ["containers", "push", names.image]), { label: "Container image push" });
+    const output = wrangler(["containers", "push", names.image], { accountID, label: "Container image push" });
     const match = /Pushed image:\s*(\S+)/.exec(output);
     if (!match) throw new Error("Container image push returned no image URI");
     return match[1];
@@ -314,7 +352,7 @@ async function main() {
   });
   runStep("bridge config render", () => run(process.execPath, [bridgeRenderer, "--out", bridgeConfig], { env: bridgeEnv, label: "bridge config render" }));
   const bridgeDeploy = runStep("private bridge deploy", () =>
-    wrangler(accountArgs(accountID, ["deploy", "--config", bridgeConfig]), { label: "bridge deployment" }),
+    wrangler(["deploy", "--config", bridgeConfig], { accountID, label: "bridge deployment" }),
   );
   const bridgeURL = parseWorkersDevURL(bridgeDeploy);
 
@@ -328,7 +366,7 @@ async function main() {
   });
   runStep("gateway config render", () => run(process.execPath, [gatewayRenderer, "--out", gatewayConfig], { env: gatewayEnv, label: "gateway config render" }));
   const gatewayDeploy = runStep("public gateway deploy", () =>
-    wrangler(accountArgs(accountID, ["deploy", "--config", gatewayConfig]), { label: "gateway deployment" }),
+    wrangler(["deploy", "--config", gatewayConfig], { accountID, label: "gateway deployment" }),
   );
   const gatewayURL = parseWorkersDevURL(gatewayDeploy);
   runStep("gateway bridge secret injection", () => secretPut(gatewayConfig, accountID, "BRIDGE_TOKEN", bridgeToken));

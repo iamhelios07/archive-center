@@ -117,14 +117,11 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// Which accelerator this deployment is BUILT AROUND, and whether it is
 	// required or merely available.
 	//
-	// These are emitted before the Cloudflare profile's bootstrap-only early
-	// return on purpose. An operator reading a /ready that says
-	// "cloudflare_parity: incomplete" needs to know the answer to "which vector
-	// engine is this thing even using" now, and that is precisely when the
-	// report was previously silent: the Cloudflare profile is not ready, so it
-	// returned before reaching this block and named no accelerator at all.
+	// The accelerator is reported independently of provider-specific legacy
+	// configuration. A Cloudflare deployment uses Vectorize through its bridge,
+	// while local deployments can use ChromaDB.
 	//
-	// It also used to branch on ChromaEnabled alone, which is false on the
+	// This used to branch on ChromaEnabled alone, which is false on the
 	// Cloudflare profile, so the answer would have been "mariadb_fallback" —
 	// wrong twice over. The accelerator there is Vectorize, and the canonical
 	// store is D1, so naming MariaDB sends an operator to a store that is not in
@@ -175,25 +172,15 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	durableOverlayDegraded := false
-	// Cloudflare profile: bootstrap-only until every parity gate lands. The
-	// profile must never report functional deployment readiness early.
 	if s.Cfg.IsCloudflareProfile() {
 		if strings.TrimSpace(s.Cfg.CloudflareBridgeURL) != "" && strings.TrimSpace(s.Cfg.CloudflareBridgeToken) != "" {
 			checks["cloudflare_bridge"] = "configured"
 		} else {
 			checks["cloudflare_bridge"] = "not_configured"
 		}
-		// Report optional-capability coverage explicitly. Routes gate features on
-		// optional interfaces, so an operator needs to see how much of the parity
-		// surface the provider satisfies instead of inferring it from quietly
-		// disabled features.
-		//
-		// The names are reported alongside the ratio because the ratio alone is not
-		// actionable: "85/86" says a capability is missing without saying which,
-		// so the reader cannot work out whether it matters. And the denominator
-		// here excludes the capabilities this profile CANNOT have, so a complete
-		// Cloudflare deployment can reach N/N rather than sitting one short
-		// forever. Every exclusion carries a reason in store.capabilityExemptions.
+		// Coverage remains observable for operators, but it is no longer a
+		// hard-coded bootstrap gate. Real runtime failures below determine
+		// readiness.
 		profile := string(s.Cfg.RuntimeProfile)
 		implemented, applicable, total := store.CapabilityCoverageForProfile(s.Store, profile)
 		checks["store_capabilities"] = strconv.Itoa(implemented) + "/" + strconv.Itoa(applicable)
@@ -205,34 +192,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			for _, exemption := range store.CapabilityExemptionsFor(profile) {
 				names = append(names, exemption.Capability+" ("+exemption.Reason+")")
 			}
-			// Stated so the smaller denominator is explained rather than looking
-			// like a capability was quietly dropped to make the number look good.
 			checks["store_capabilities_inapplicable"] = strings.Join(names, "; ")
 		}
 		durableOverlayDegraded = s.addDurableSearchOverlayReadiness(r.Context(), checks)
-		if s.Cfg.CloudflareProfileReady() {
-			checks["cloudflare_profile"] = "ready"
-			checks["cloudflare_parity"] = "complete"
-		} else {
-			checks["cloudflare_profile"] = "bootstrap_only"
-			checks["cloudflare_parity"] = "incomplete"
-			checks["ready_blocker"] = "cloudflare_parity_incomplete"
-			writeJSON(w, http.StatusServiceUnavailable, readyResponse{
-				Ready:                   false,
-				BackendInstanceID:       s.backendInstanceID(),
-				StoreReady:              false,
-				VectorReady:             false,
-				ReferenceVectorReady:    false,
-				ReferenceVectorDegraded: false,
-				RuntimeProfile:          string(s.Cfg.RuntimeProfile),
-				VectorMode:              string(s.Cfg.VectorMode),
-				Degraded:                true,
-				Mode:                    string(s.Cfg.Mode),
-				Checks:                  checks,
-				Timestamp:               time.Now().UTC().Format(time.RFC3339),
-			})
-			return
-		}
 	}
 
 	if s.Cfg.Readiness.MariaDBConfigured {
@@ -260,6 +222,12 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if s.indexRecoveryState.Load() == 2 {
 		checks["chromadb_vector"] = "recovering"
 		checks["chromadb_recovery"] = "running"
+	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil && s.Vector == nil {
+		checks["chromadb_vector"] = "unavailable"
+		checks["chromadb_vector_error"] = "vector store is not initialized"
+		if !s.Cfg.VectorRequiresEndpoint() {
+			vectorDegraded = true
+		}
 	} else if s.Cfg.VectorAcceleratorEnabled() && s.Cfg.VectorAcceleratorConfigured() && s.VectorOpenError == nil {
 		health, healthErr := s.Vector.Health(r.Context())
 		if healthErr == nil && strings.TrimSpace(health.Status) == "ok" && health.ModelReady {
@@ -302,10 +270,6 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			vectorDegraded = true
 		}
 	}
-	// The vector accelerator labels are emitted near the top of the report, before
-	// the Cloudflare bootstrap early-return, because an operator reading a
-	// bootstrap-only /ready still needs to know which engine the deployment is
-	// built around. See the block above for the full reasoning.
 
 	referenceVectorReady := false
 	referenceVectorDegraded := false

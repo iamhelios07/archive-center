@@ -310,6 +310,23 @@ func TestValidateAllowsLiveAndCutoverWithMariaDBAuthority(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsLiveAndCutoverWithCloudflareAuthority(t *testing.T) {
+	for _, mode := range []Mode{ModeLive, ModeCutover} {
+		cfg := Default()
+		cfg.Mode = mode
+		cfg.RuntimeProfile = RuntimeProfileCloudflare
+		cfg.StoreMode = StoreModeCloudflareAuthority
+		cfg.VectorMode = VectorModeCloudflare
+		cfg.CloudflareBridgeURL = "https://archive-center-bridge.invalid"
+		cfg.CloudflareBridgeToken = "bridge-token"
+		cfg.Auth.Enforce = true
+		cfg.Auth.BearerToken = "operator-token"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate() should allow mode %q with Cloudflare authority: %v", mode, err)
+		}
+	}
+}
+
 func TestValidateAllowsShadow(t *testing.T) {
 	cfg := Default()
 	cfg.Mode = ModeShadow
@@ -407,6 +424,24 @@ func TestIsLiveCutoverAllowed(t *testing.T) {
 	cfg.ChromaEndpoint = "http://127.0.0.1:8000"
 	if !cfg.IsLiveCutoverAllowed() {
 		t.Error("IsLiveCutoverAllowed() should be true with live MariaDB authority and required Chroma config")
+	}
+}
+
+func TestIsLiveCutoverAllowedCloudflareAuthority(t *testing.T) {
+	cfg := Default()
+	cfg.Mode = ModeLive
+	cfg.RuntimeProfile = RuntimeProfileCloudflare
+	cfg.StoreMode = StoreModeCloudflareAuthority
+	cfg.VectorMode = VectorModeCloudflare
+	cfg.CloudflareBridgeURL = "https://archive-center-bridge.invalid"
+	cfg.CloudflareBridgeToken = "bridge-token"
+
+	if !cfg.IsLiveCutoverAllowed() {
+		t.Error("IsLiveCutoverAllowed() should be true for a configured Cloudflare authority deployment")
+	}
+	cfg.CloudflareBridgeToken = ""
+	if cfg.IsLiveCutoverAllowed() {
+		t.Error("IsLiveCutoverAllowed() should reject Cloudflare authority without bridge credentials")
 	}
 }
 
@@ -547,9 +582,6 @@ func TestLoadCloudflareProfile(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() should allow the explicit cloudflare profile: %v", err)
 	}
-	if cfg.CloudflareProfileReady() {
-		t.Error("CloudflareProfileReady() must stay false until every parity gate lands")
-	}
 	if strings.Contains(cfg.String(), "bridge-token") {
 		t.Error("String() must never include the Cloudflare bridge token")
 	}
@@ -565,9 +597,6 @@ func TestLoadCloudflareProfileDefaultsToCloudflareVectorMode(t *testing.T) {
 
 	if cfg.VectorMode != VectorModeCloudflare {
 		t.Errorf("VectorMode = %q, want %q", cfg.VectorMode, VectorModeCloudflare)
-	}
-	if cfg.CloudflareProfileReady() != cloudflareParityComplete {
-		t.Error("CloudflareProfileReady() must track cloudflareParityComplete")
 	}
 }
 

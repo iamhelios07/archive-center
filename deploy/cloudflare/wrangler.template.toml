@@ -40,3 +40,6 @@ index_name = "archive-center-vectors"
 #   npx wrangler vectorize create archive-center-vectors --dimensions=<N> --metric=cosine
 # See README.md, "Provision the account-scoped resources", for how to determine
 # <N> from data rather than from the declarative AC_EMBEDDER_MODEL.
+
+[observability]
+enabled = true

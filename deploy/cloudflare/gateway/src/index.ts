@@ -83,6 +83,9 @@ export class ArchiveCenterContainer extends Container<GatewayEnv> {
     AC_VECTOR_MODE: "cloudflare",
     AC_CLOUDFLARE_BRIDGE_URL: this.env.BRIDGE_URL,
     AC_CLOUDFLARE_BRIDGE_TOKEN: this.env.BRIDGE_TOKEN,
+    // Cloudflare authority is a production canonical store, not a shadow-only
+    // bootstrap. Config validates the D1/Vectorize bridge before allowing live.
+    AC_MODE: "live",
     AC_ENFORCE_AUTH: "true",
     AC_BEARER_TOKEN: this.env.AC_BEARER_TOKEN,
     AC_BIND_ADDR: "0.0.0.0:28080",

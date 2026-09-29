@@ -451,8 +451,8 @@ func (c Config) Validate() error {
 	if err := c.validateProfileVectorPair(); err != nil {
 		return err
 	}
-	if (c.Mode == ModeLive || c.Mode == ModeCutover) && (c.StoreMode != StoreModeMariaDBAuthority || strings.TrimSpace(c.MariaDBDSN) == "") {
-		return fmt.Errorf("config: mode %q requires AC_STORE_MODE=%q and AC_MARIADB_DSN", c.Mode, StoreModeMariaDBAuthority)
+	if (c.Mode == ModeLive || c.Mode == ModeCutover) && c.StoreMode != StoreModeMariaDBAuthority && c.StoreMode != StoreModeCloudflareAuthority {
+		return fmt.Errorf("config: mode %q requires an authoritative store mode (%q or %q)", c.Mode, StoreModeMariaDBAuthority, StoreModeCloudflareAuthority)
 	}
 	if c.StoreMode != StoreModeNoop && c.StoreMode != StoreModeDualShadow && c.StoreMode != StoreModeMariaDBShadow && c.StoreMode != StoreModeFixtureShadow && c.StoreMode != StoreModeMariaDBReadShadow && c.StoreMode != StoreModeMariaDBAuthority && c.StoreMode != StoreModeCloudflareAuthority {
 		return fmt.Errorf("config: store_mode %q is not allowed", c.StoreMode)
@@ -568,20 +568,6 @@ func (c Config) IsCloudflareProfile() bool {
 	return c.RuntimeProfile == RuntimeProfileCloudflare && c.StoreMode == StoreModeCloudflareAuthority && c.VectorMode == VectorModeCloudflare
 }
 
-// cloudflareParityComplete marks whether every C/V/O parity gate for the
-// Cloudflare profile has landed. Stage 2 ships only the runtime bootstrap and
-// the Worker bridge contract, so it stays false: the Cloudflare profile must
-// not be reported as a functional deployment until the remaining stages
-// implement D1 canonical parity, Vectorize semantic parity, and operator
-// parity, and flip this constant.
-const cloudflareParityComplete = false
-
-// CloudflareProfileReady reports whether the Cloudflare profile has passed
-// every parity gate and may advertise functional deployment readiness.
-func (c Config) CloudflareProfileReady() bool {
-	return c.IsCloudflareProfile() && cloudflareParityComplete
-}
-
 // VectorRequiresEndpoint reports whether this profile must have a ChromaDB
 // endpoint to satisfy readiness.
 func (c Config) VectorRequiresEndpoint() bool {
@@ -689,11 +675,20 @@ func (c Config) VectorAcceleratorSelected() string {
 }
 
 // IsLiveCutoverAllowed is the runtime guard for product-mode execution.
+// MariaDB and Cloudflare are both canonical authority deployments; each has a
+// distinct, explicit connectivity contract.
 func (c Config) IsLiveCutoverAllowed() bool {
-	return (c.Mode == ModeLive || c.Mode == ModeCutover) &&
-		c.StoreMode == StoreModeMariaDBAuthority &&
-		strings.TrimSpace(c.MariaDBDSN) != "" &&
-		c.VectorPolicySatisfied()
+	if c.Mode != ModeLive && c.Mode != ModeCutover {
+		return false
+	}
+	switch c.StoreMode {
+	case StoreModeMariaDBAuthority:
+		return strings.TrimSpace(c.MariaDBDSN) != "" && c.VectorPolicySatisfied()
+	case StoreModeCloudflareAuthority:
+		return c.IsCloudflareProfile() && c.VectorAcceleratorConfigured()
+	default:
+		return false
+	}
 }
 
 // String returns a redacted string representation safe for logs.

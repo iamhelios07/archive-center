@@ -25,3 +25,6 @@ class_name = "ArchiveCenterContainer"
 # Replaced by the ignored renderer output with a Cloudflare Registry image URI.
 image = "registry.cloudflare.com/archive-center/archive-center-go:render-me"
 max_instances = 1
+
+[observability]
+enabled = true
