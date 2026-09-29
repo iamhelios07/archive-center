@@ -174,6 +174,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		checks["store_open_error"] = "none"
 	}
 
+	durableOverlayDegraded := false
 	// Cloudflare profile: bootstrap-only until every parity gate lands. The
 	// profile must never report functional deployment readiness early.
 	if s.Cfg.IsCloudflareProfile() {
@@ -208,6 +209,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			// like a capability was quietly dropped to make the number look good.
 			checks["store_capabilities_inapplicable"] = strings.Join(names, "; ")
 		}
+		durableOverlayDegraded = s.addDurableSearchOverlayReadiness(r.Context(), checks)
 		if s.Cfg.CloudflareProfileReady() {
 			checks["cloudflare_profile"] = "ready"
 			checks["cloudflare_parity"] = "complete"
@@ -254,7 +256,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		checks["chromadb"] = "not_configured"
 	}
 	vectorReady := false
-	vectorDegraded := false
+	vectorDegraded := durableOverlayDegraded
 	if s.indexRecoveryState.Load() == 2 {
 		checks["chromadb_vector"] = "recovering"
 		checks["chromadb_recovery"] = "running"

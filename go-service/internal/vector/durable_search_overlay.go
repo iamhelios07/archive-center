@@ -45,7 +45,7 @@ func (s *durableSearchOverlayStore) Search(ctx context.Context, sessionID string
 	if effectiveLimit <= 0 {
 		effectiveLimit = durableSearchOverlayDefaultLimit
 	}
-	snapshot, err := s.overlay.DurableSearchOverlay(ctx, sessionID, effectiveLimit)
+	snapshot, err := s.overlay.DurableSearchOverlay(ctx, sessionID, DurableSearchOverlayMaxDocuments)
 	if err != nil {
 		return nil, err
 	}

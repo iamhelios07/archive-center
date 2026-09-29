@@ -24,6 +24,8 @@ type CanonicalDocumentProvider interface {
 // A returned snapshot is usable only when Truncated is false. Providers must
 // return current visibility-pending upserts and canonical delete masks from one
 // logical snapshot, so an old accelerator hit cannot outlive a newer tombstone.
+// An empty sessionID requests an aggregate operator snapshot; it is for
+// observability only and must never be merged into a session Search.
 type DurableSearchOverlayProvider interface {
 	DurableSearchOverlay(context.Context, string, int) (DurableSearchOverlaySnapshot, error)
 }

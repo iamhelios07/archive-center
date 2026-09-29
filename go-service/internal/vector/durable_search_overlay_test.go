@@ -56,8 +56,8 @@ func TestDurableSearchOverlayAddsFilteredPendingUpsertAndRanksByCosine(t *testin
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if overlay.session != "session" || overlay.maximum != 3 {
-		t.Fatalf("snapshot call = session=%q maximum=%d, want session/3", overlay.session, overlay.maximum)
+	if overlay.session != "session" || overlay.maximum != DurableSearchOverlayMaxDocuments {
+		t.Fatalf("snapshot call = session=%q maximum=%d, want session/%d", overlay.session, overlay.maximum, DurableSearchOverlayMaxDocuments)
 	}
 	if len(docs) != 2 || docs[0].ID != "pending" || docs[1].ID != "accelerator" {
 		t.Fatalf("docs = %#v, want pending cosine result then accelerator result", docs)
@@ -99,8 +99,8 @@ func TestDurableSearchOverlayTreatsAcceleratorNotFoundAsAnEmptyCandidateSet(t *t
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if len(docs) != 1 || docs[0].ID != "pending" || overlay.maximum != durableSearchOverlayDefaultLimit {
-		t.Fatalf("docs=%#v maximum=%d, want pending result and default maximum", docs, overlay.maximum)
+	if len(docs) != 1 || docs[0].ID != "pending" || overlay.maximum != DurableSearchOverlayMaxDocuments {
+		t.Fatalf("docs=%#v maximum=%d, want pending result and bounded correction maximum", docs, overlay.maximum)
 	}
 }
 

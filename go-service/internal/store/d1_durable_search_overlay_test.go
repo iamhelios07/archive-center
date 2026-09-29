@@ -130,8 +130,11 @@ func TestD1DurableSearchOverlayRejectsPartialSnapshot(t *testing.T) {
 	if !snapshot.Truncated || snapshot.PendingCount != 2 {
 		t.Fatalf("snapshot = %#v, want truncated snapshot with two pending upserts", snapshot)
 	}
-	if len(snapshot.Upserts) != 0 || len(snapshot.TombstoneIDs) != 0 || !snapshot.OldestPendingAt.IsZero() {
+	if len(snapshot.Upserts) != 0 || len(snapshot.TombstoneIDs) != 0 {
 		t.Fatalf("truncated snapshot leaked a partial correction set: %#v", snapshot)
+	}
+	if snapshot.OldestPendingAt.IsZero() {
+		t.Fatalf("truncated snapshot omitted the oldest pending timestamp: %#v", snapshot)
 	}
 }
 

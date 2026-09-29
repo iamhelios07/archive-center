@@ -235,6 +235,10 @@ func (s *Server) prepareTurnVectorShadowWithPreciseCandidateLimits(ctx context.C
 		shadow["health_error"] = "vector store is not configured"
 		return result
 	}
+	// D1's visibility delta is not a second recall lane. Trace its bounded
+	// operational state separately so a lagging Vectorize replica is diagnosable
+	// without exposing its raw storage errors or mutating the outbox.
+	shadow["durable_search_overlay"] = s.durableSearchOverlayObservation(ctx, req.ChatSessionID)
 	healthStarted := time.Now()
 	health, err := s.Vector.Health(ctx)
 	searchTiming.addElapsed("health", healthStarted)

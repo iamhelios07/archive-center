@@ -15,6 +15,14 @@ var (
 	ErrDurableSearchOverloaded = errors.New("durable search overlay exceeds its bounded correction capacity")
 )
 
+// Durable Search overlay limits make the bounded correction contract observable
+// without widening VectorStore's Chroma-compatible method signatures.
+const (
+	DurableSearchOverlayMaxDocuments = 200
+	DurableSearchOverlaySoftTTL      = 5 * time.Minute
+	DurableSearchOverlayHardAlertTTL = 15 * time.Minute
+)
+
 // VectorStore defines the core vector search and management contract.
 // This mirrors the Chroma shadow operations analyzed in 0.8.
 type VectorStore interface {

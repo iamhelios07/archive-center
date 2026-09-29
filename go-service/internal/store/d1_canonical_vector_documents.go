@@ -77,12 +77,13 @@ func (s *d1Store) DurableSearchOverlay(ctx context.Context, sessionID string, ma
 		), selected AS (
 			SELECT overlay_kind, document_id, document_json, updated_at,
 			       SUM(CASE WHEN overlay_kind = 'upsert' THEN 1 ELSE 0 END) OVER () AS pending_count,
+			       MIN(CASE WHEN overlay_kind = 'upsert' THEN updated_at END) OVER () AS oldest_pending_at,
 			       COUNT(*) OVER () AS overlay_count
 			FROM effective
 			WHERE overlay_kind <> ''
 		)
 		SELECT overlay_kind, document_id, COALESCE(document_json, ''), updated_at,
-		       pending_count, overlay_count
+		       pending_count, COALESCE(oldest_pending_at, ''), overlay_count
 		FROM selected
 		ORDER BY document_id
 		LIMIT ?`
@@ -100,14 +101,21 @@ func (s *d1Store) DurableSearchOverlay(ctx context.Context, sessionID string, ma
 	}
 	first := true
 	for rows.Next() {
-		var kind, documentID, payload, updatedAtText string
+		var kind, documentID, payload, updatedAtText, oldestPendingAtText string
 		var pendingCount, overlayCount int
-		if err := rows.Scan(&kind, &documentID, &payload, &updatedAtText, &pendingCount, &overlayCount); err != nil {
+		if err := rows.Scan(&kind, &documentID, &payload, &updatedAtText, &pendingCount, &oldestPendingAtText, &overlayCount); err != nil {
 			return vector.DurableSearchOverlaySnapshot{}, err
 		}
 		if first {
 			first = false
 			snapshot.PendingCount = pendingCount
+			if oldestPendingAtText != "" {
+				oldestPendingAt, err := parseD1Time(oldestPendingAtText)
+				if err != nil {
+					return vector.DurableSearchOverlaySnapshot{}, fmt.Errorf("durable search overlay oldest pending timestamp: %w", err)
+				}
+				snapshot.OldestPendingAt = oldestPendingAt
+			}
 			snapshot.Truncated = overlayCount > maxDocuments
 			if snapshot.Truncated {
 				return snapshot, nil
