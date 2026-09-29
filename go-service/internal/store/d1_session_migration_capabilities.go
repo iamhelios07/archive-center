@@ -106,7 +106,11 @@ const d1SessionMigrationBatchChunk = 60
 // A trailing comma in an IN list is a parse error rather than an empty set, so
 // the placeholder string is always built from an explicit count, and an empty
 // list becomes a predicate that is false rather than a malformed fragment.
-const d1SessionMigrationInClauseChunk = 200
+//
+// The bound is d1BoundParameterCeiling rather than a local number: the earlier
+// value of 200 cleared the local SQLite harness, which allows far more bindings
+// than D1, and then failed against D1 for a wide migration.
+const d1SessionMigrationInClauseChunk = d1BoundParameterCeiling
 
 // d1SessionMigrationRevertedStatuses is the set of statuses a rollback considers
 // already finished. The resume lookup and the rollback result share it so the two

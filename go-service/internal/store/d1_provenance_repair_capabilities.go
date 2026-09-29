@@ -551,10 +551,14 @@ var _ VectorRecoveryCacheReader = (*d1Store)(nil)
 // look like a transport failure.
 func (s *d1Store) ReadVectorRecoveryCache(ctx context.Context, ids []string) ([]string, error) {
 	result := []string{}
-	for start := 0; start < len(ids); start += 200 {
-		end := min(start+200, len(ids))
-		args := make([]any, 0, end-start)
-		for _, id := range ids[start:end] {
+	// Startup recovery can hand this every cached document id in the account, and
+	// D1 binds at most 100 parameters per statement. The previous chunk of 200
+	// cleared the local SQLite harness and failed against D1, which is how a
+	// recovery read that only runs on restart could be wrong exactly when it is
+	// needed.
+	for _, chunk := range d1BindChunks(ids, 0) {
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
 			args = append(args, id)
 		}
 		rows, err := s.conn.Query(ctx, `SELECT document_json FROM memory_vector_outbox

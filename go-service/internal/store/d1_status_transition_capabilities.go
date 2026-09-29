@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -838,32 +839,55 @@ func (s *d1Store) ListReversibleStatusCurrentValues(ctx context.Context, chatSes
 	if len(keys) == 0 {
 		return []StatusCurrentValue{}, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	// The read is uncapped by contract, but the statement is not: D1 binds at
+	// most 100 parameters, and a status registry with more keys than that would
+	// fail in deployment and nowhere else. Splitting the list keeps the result
+	// exact — bounding it would truncate a rebuild into an apparently complete
+	// but wrong state.
 	query := d1StatusTransitionCurrentValueProjection + `
 	WHERE current_value.chat_session_id = ?` +
 		d1StatusTransitionCurrentValueEligible + `
 		  AND current_value.owner_scope = ?
-		  AND current_value.status_key IN (` + placeholders + `)
+		  AND current_value.status_key IN (%s)
 		ORDER BY current_value.status_key ASC, current_value.owner_scope ASC, current_value.owner_id ASC`
-	args := make([]any, 0, len(keys)+2)
-	args = append(args, chatSessionID, strings.TrimSpace(ownerScope))
-	for _, key := range keys {
-		args = append(args, key)
-	}
-	rows, err := s.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	out := []StatusCurrentValue{}
-	for rows.Next() {
-		item, scanErr := d1StatusTransitionScanCurrent(rows)
-		if scanErr != nil {
-			return nil, scanErr
+	for _, chunk := range d1BindChunks(keys, 2) {
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, chatSessionID, strings.TrimSpace(ownerScope))
+		for _, key := range chunk {
+			args = append(args, key)
 		}
-		out = append(out, item)
+		rows, err := s.conn.Query(ctx, fmt.Sprintf(query,
+			strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			item, scanErr := d1StatusTransitionScanCurrent(rows)
+			if scanErr != nil {
+				rows.Close()
+				return nil, scanErr
+			}
+			out = append(out, item)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out, rows.Err()
+	// Each chunk is ordered internally; the merge restores the single ordering
+	// the caller saw before the list was split.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].StatusKey != out[j].StatusKey {
+			return out[i].StatusKey < out[j].StatusKey
+		}
+		if out[i].OwnerScope != out[j].OwnerScope {
+			return out[i].OwnerScope < out[j].OwnerScope
+		}
+		return out[i].OwnerID < out[j].OwnerID
+	})
+	return out, nil
 }
 
 // d1StatusTransitionLatestProjectionEvents is the "one current observation per
@@ -922,22 +946,42 @@ func (s *d1Store) ListLatestReversibleCurrentProjectionEvents(ctx context.Contex
 	if len(keys) == 0 {
 		return []StatusChangeEvent{}, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
-	rows, err := s.conn.Query(ctx, fmt.Sprintf(d1StatusTransitionLatestProjectionEvents, placeholders),
-		append([]any{chatSessionID}, d1StatusTransitionKeyArgs(keys)...)...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	// The anti-join that picks the winner compares status_key to itself, so a
+	// row's outcome depends only on keys inside its own chunk. Splitting is
+	// therefore exact rather than approximate, and it keeps a large registry
+	// from failing in deployment where D1's 100-parameter limit applies.
 	out := []StatusChangeEvent{}
-	for rows.Next() {
-		item, scanErr := d1StatusTransitionScanEvent(rows)
-		if scanErr != nil {
-			return nil, scanErr
+	for _, chunk := range d1BindChunks(keys, 1) {
+		rows, err := s.conn.Query(ctx, fmt.Sprintf(d1StatusTransitionLatestProjectionEvents,
+			strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")),
+			append([]any{chatSessionID}, d1StatusTransitionKeyArgs(chunk)...)...)
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, item)
+		for rows.Next() {
+			item, scanErr := d1StatusTransitionScanEvent(rows)
+			if scanErr != nil {
+				rows.Close()
+				return nil, scanErr
+			}
+			out = append(out, item)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out, rows.Err()
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].StatusKey != out[j].StatusKey {
+			return out[i].StatusKey < out[j].StatusKey
+		}
+		if out[i].OwnerScope != out[j].OwnerScope {
+			return out[i].OwnerScope < out[j].OwnerScope
+		}
+		return out[i].OwnerID < out[j].OwnerID
+	})
+	return out, nil
 }
 
 // d1StatusTransitionKeyArgs binds an IN list in the order the placeholders were

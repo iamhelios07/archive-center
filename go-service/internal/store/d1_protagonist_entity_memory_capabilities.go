@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 )
@@ -267,10 +268,10 @@ func (s *d1Store) CreateProtagonistEntityMemory(ctx context.Context, item *Prota
 // An empty result is a non-nil empty slice, so a session with no subjective
 // memory encodes identically on both providers.
 func (s *d1Store) ListProtagonistEntityMemories(ctx context.Context, filter ProtagonistEntityMemoryFilter) ([]ProtagonistEntityMemory, error) {
-	query := `SELECT ` + d1ProtagonistEntityMemoryColumns + `
+	baseQuery := `SELECT ` + d1ProtagonistEntityMemoryColumns + `
 		FROM protagonist_entity_memories
 		WHERE 1 = 1`
-	args := []any{}
+	baseArgs := []any{}
 
 	// The owner filter is a precedence chain, not a conjunction. Only the first
 	// applicable branch is applied, because each branch answers a different
@@ -285,61 +286,93 @@ func (s *d1Store) ListProtagonistEntityMemories(ctx context.Context, filter Prot
 		seenOwnerKeys[key] = true
 		ownerKeys = append(ownerKeys, key)
 	}
+	// A wide owner set is split, and each chunk carries the full ORDER BY and
+	// LIMIT. D1 binds at most 100 parameters, and a set large enough to exceed
+	// it failed in deployment while passing every local test.
+	ownerChunks := [][]string{nil}
 	switch {
 	case len(ownerKeys) > 0:
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ownerKeys)), ",")
-		// The IN list runs against the RESOLVED owner key so one key selects the
-		// memory whether or not the row carries its own owner column.
-		query += " AND COALESCE(NULLIF(TRIM(owner_entity_key), ''), TRIM(persona_entity_key)) IN (" + placeholders + ")"
-		for _, key := range ownerKeys {
-			args = append(args, key)
-		}
+		ownerChunks = d1BindChunks(ownerKeys, 0)
 	case strings.TrimSpace(filter.OwnerEntityKey) != "":
-		query += " AND (owner_entity_key = ? OR (owner_entity_key = '' AND persona_entity_key = ?))"
 		key := strings.TrimSpace(filter.OwnerEntityKey)
-		args = append(args, key, key)
+		baseQuery += " AND (owner_entity_key = ? OR (owner_entity_key = '' AND persona_entity_key = ?))"
+		baseArgs = append(baseArgs, key, key)
 	case strings.TrimSpace(filter.PersonaEntityKey) != "":
-		query += " AND (persona_entity_key = ? OR owner_entity_key = ?)"
 		key := strings.TrimSpace(filter.PersonaEntityKey)
-		args = append(args, key, key)
+		baseQuery += " AND (persona_entity_key = ? OR owner_entity_key = ?)"
+		baseArgs = append(baseArgs, key, key)
 	}
 
 	if role := strings.TrimSpace(filter.OwnerEntityRole); role != "" {
-		query += " AND owner_entity_role = ?"
-		args = append(args, role)
+		baseQuery += " AND owner_entity_role = ?"
+		baseArgs = append(baseArgs, role)
 	}
 	if visibility := strings.TrimSpace(filter.OwnerVisibility); visibility != "" {
-		query += " AND owner_visibility = ?"
-		args = append(args, visibility)
+		baseQuery += " AND owner_visibility = ?"
+		baseArgs = append(baseArgs, visibility)
 	}
 	if sessionID := strings.TrimSpace(filter.SourceChatSessionID); sessionID != "" {
-		query += " AND source_chat_session_id = ?"
-		args = append(args, sessionID)
+		baseQuery += " AND source_chat_session_id = ?"
+		baseArgs = append(baseArgs, sessionID)
 	}
 	// One ORDER BY with a stable tiebreak: updated_at is TEXT but zero-padded
 	// RFC3339 UTC, so it orders chronologically, and id breaks ties between rows
 	// written in the same instant.
-	query += " ORDER BY updated_at DESC, id DESC"
+	tail := " ORDER BY updated_at DESC, id DESC"
 	if filter.Limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, filter.Limit)
+		tail += " LIMIT ?"
 	}
-
-	rows, err := s.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
 	out := []ProtagonistEntityMemory{}
-	for rows.Next() {
-		item, err := scanD1ProtagonistEntityMemory(rows)
+	for _, chunk := range ownerChunks {
+		query := baseQuery
+		args := append([]any{}, baseArgs...)
+		if chunk != nil {
+			// The IN list runs against the RESOLVED owner key so one key selects
+			// the memory whether or not the row carries its own owner column.
+			query += " AND COALESCE(NULLIF(TRIM(owner_entity_key), ''), TRIM(persona_entity_key)) IN (" +
+				strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",") + ")"
+			for _, key := range chunk {
+				args = append(args, key)
+			}
+		}
+		chunkQuery := query + tail
+		if filter.Limit > 0 {
+			args = append(args, filter.Limit)
+		}
+		rows, err := s.conn.Query(ctx, chunkQuery, args...)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, item)
+		for rows.Next() {
+			item, err := scanD1ProtagonistEntityMemory(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, item)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out, rows.Err()
+	if len(ownerChunks) > 1 {
+		// Each chunk is ordered internally; the merge restores the one ordering
+		// the caller saw, and the limit is re-applied because every chunk could
+		// return a full page on its own.
+		sort.SliceStable(out, func(i, j int) bool {
+			if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+				return out[i].UpdatedAt.After(out[j].UpdatedAt)
+			}
+			return out[i].ID > out[j].ID
+		})
+		if filter.Limit > 0 && len(out) > filter.Limit {
+			out = out[:filter.Limit]
+		}
+	}
+	return out, nil
 }
 
 // UpdateProtagonistEntityMemoryOwner canonicalizes the owner identity of one

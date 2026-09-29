@@ -803,12 +803,18 @@ const d1CanonFactIdentityLookup = `
 // trailing comma in an IN list is a parse error in SQLite, not an empty set.
 const d1CanonPlaceholderList = "{{PLACEHOLDERS}}"
 
-// d1CanonLookupChunk bounds one IN list. SQLite caps bound parameters per
-// statement well below what a large pack can name, and a trailing comma in an IN
-// list is a parse error rather than an empty set, so the placeholder run is
-// always built from an explicit count. A pack that exceeded the cap would fail
-// the whole install for a reason that has nothing to do with the pack.
-const d1CanonLookupChunk = 200
+// d1CanonLookupChunk bounds one IN list. A pack can name far more documents and
+// facts than one statement may bind, and a trailing comma in an IN list is a
+// parse error rather than an empty set, so the placeholder run is always built
+// from an explicit count. A pack that exceeded the cap would fail the whole
+// install for a reason that has nothing to do with the pack.
+//
+// The bound is d1BoundParameterCeiling rather than a number chosen here: the
+// earlier value of 200 was sized against SQLite, which the local harness runs
+// and which allows far more bindings than D1 does, so it cleared the local suite
+// and still failed in deployment. A pack install is the worst place to discover
+// that.
+const d1CanonLookupChunk = d1BoundParameterCeiling
 
 // ---------------------------------------------------------------------------
 // CanonPackStore — install

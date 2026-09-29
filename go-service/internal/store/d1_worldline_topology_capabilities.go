@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -260,25 +261,32 @@ func (s *d1Store) d1WorldlineFamilySessionIDs(ctx context.Context, stableCharact
 // re-imported twice at the same instant is ordered by the later write rather
 // than by whatever order the rows are stored in.
 func (s *d1Store) d1WorldlineLineageRecords(ctx context.Context, sessionIDs []string) ([]ForkLineageRecord, error) {
-	rows, err := s.conn.Query(ctx, d1ForkLineageSelect+
-		` WHERE chat_session_id IN (`+d1WorldlinePlaceholders(len(sessionIDs))+`)
-		  ORDER BY chat_session_id ASC, imported_at DESC, id DESC`,
-		d1WorldlineAnyArgs(sessionIDs)...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+	// The family is capped at 1000 sessions, which is well past what D1 binds in
+	// one statement, so a large family failed in deployment while passing every
+	// local test. The chunks follow the family's own ordering, so concatenating
+	// them in order preserves the ORDER BY the statement already guarantees.
 	records := make([]ForkLineageRecord, 0, len(sessionIDs))
-	for rows.Next() {
-		record, err := d1ScanForkLineageRecord(rows)
+	for _, chunk := range d1BindChunks(sessionIDs, 0) {
+		rows, err := s.conn.Query(ctx, d1ForkLineageSelect+
+			` WHERE chat_session_id IN (`+d1WorldlinePlaceholders(len(chunk))+`)
+			  ORDER BY chat_session_id ASC, imported_at DESC, id DESC`,
+			d1WorldlineAnyArgs(chunk)...)
 		if err != nil {
 			return nil, err
 		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		for rows.Next() {
+			record, err := d1ScanForkLineageRecord(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			records = append(records, record)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return records, nil
 }
@@ -290,29 +298,45 @@ func (s *d1Store) d1WorldlineLineageRecords(ctx context.Context, sessionIDs []st
 // the shared worldlineTopologyCompletedTurnLimit constant, not a per-provider
 // number, so the two providers truncate the same graph at the same point.
 func (s *d1Store) d1WorldlineCompletedTurns(ctx context.Context, sessionIDs []string) ([]WorldlineCompletedTurn, error) {
-	args := append(d1WorldlineAnyArgs(sessionIDs), worldlineTopologyCompletedTurnLimit+1)
-	rows, err := s.conn.Query(ctx,
-		fmt.Sprintf(d1WorldlineTopologyCompletedTurnSQL, d1WorldlinePlaceholders(len(sessionIDs))),
-		args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+	// Each chunk asks for one row past the cap so the caller can still decide
+	// truncation from the result rather than from a second count query. A chunk
+	// cannot contribute more than the whole cap to the global top, so asking for
+	// cap+1 per chunk and merging is exact rather than an approximation.
 	turns := make([]WorldlineCompletedTurn, 0, len(sessionIDs))
-	for rows.Next() {
-		var turn WorldlineCompletedTurn
-		if err := rows.Scan(&turn.ChatSessionID, &turn.TurnIndex); err != nil {
+	for _, chunk := range d1BindChunks(sessionIDs, 1) {
+		args := append(d1WorldlineAnyArgs(chunk), worldlineTopologyCompletedTurnLimit+1)
+		rows, err := s.conn.Query(ctx,
+			fmt.Sprintf(d1WorldlineTopologyCompletedTurnSQL, d1WorldlinePlaceholders(len(chunk))),
+			args...)
+		if err != nil {
 			return nil, err
 		}
-		turn.ChatSessionID = strings.TrimSpace(turn.ChatSessionID)
-		if turn.ChatSessionID != "" && turn.TurnIndex > 0 {
-			turns = append(turns, turn)
+		for rows.Next() {
+			var turn WorldlineCompletedTurn
+			if err := rows.Scan(&turn.ChatSessionID, &turn.TurnIndex); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			turn.ChatSessionID = strings.TrimSpace(turn.ChatSessionID)
+			if turn.ChatSessionID != "" && turn.TurnIndex > 0 {
+				turns = append(turns, turn)
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+	// The statement orders by (turn_index, chat_session_id) across the whole
+	// family. Splitting by session breaks that global order, so the merge
+	// restores it before the caller truncates positionally.
+	sort.SliceStable(turns, func(i, j int) bool {
+		if turns[i].TurnIndex != turns[j].TurnIndex {
+			return turns[i].TurnIndex < turns[j].TurnIndex
+		}
+		return turns[i].ChatSessionID < turns[j].ChatSessionID
+	})
 	return turns, nil
 }
 

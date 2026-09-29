@@ -25,6 +25,14 @@ class_name = "ArchiveCenterContainer"
 # Replaced by the ignored renderer output with a Cloudflare Registry image URI.
 image = "registry.cloudflare.com/archive-center/archive-center-go:render-me"
 max_instances = 1
+# An explicit instance type, because the unset default is not a decision this
+# deployment may leave to chance. lite carries 256 MiB of memory, and this
+# backend holds a turn's candidate pool, hydration buffers and a multi-agent
+# round in memory at once. Memory exhaustion during a turn kills the process,
+# which drops the in-process turn workflow ledger and strands the HUD stream.
+# basic carries 1 GiB. This is a resource floor, not a sleep control:
+# sleepAfter above is what governs idling, independently of instance type.
+instance_type = "basic"
 
 [observability]
 enabled = true

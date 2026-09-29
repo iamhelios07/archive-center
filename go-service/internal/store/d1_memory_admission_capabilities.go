@@ -353,42 +353,60 @@ func (s *d1Store) d1ReadOutboxForAdmissions(
 	// The two IN lists are built separately. Reusing one placeholder string for
 	// both would put a trailing comma in whichever list is shorter, and
 	// "IN (?,?,)" is a parse error rather than an empty match.
-	conditions := make([]string, 0, 2)
-	args := []any{admission.ChatSessionID}
-	if len(operationKeys) > 0 {
-		conditions = append(conditions, "operation_key IN ("+d1AdmissionPlaceholders(len(operationKeys))+")")
-		for _, key := range operationKeys {
-			args = append(args, key)
-		}
-	}
-	if len(documentIDs) > 0 {
-		conditions = append(conditions, "document_id IN ("+d1AdmissionPlaceholders(len(documentIDs))+")")
-		for _, id := range documentIDs {
-			args = append(args, id)
-		}
-	}
-	query := `
+	// The two IN lists are read in chunks. A turn that admits many memories
+	// produces one operation key and one document id per projection, so the
+	// combined list grows with the turn: it stays under D1's bound-parameter
+	// limit for ordinary turns and crosses it for a long one. That produced
+	// "too many SQL variables" only in deployment, because the local harness
+	// runs SQLite and allows far more bindings than D1 does.
+	const chunkReserved = 1 // chat_session_id
+	statement := `
 		SELECT id, operation_key, operation, chat_session_id, source_revision,
 		       document_id, COALESCE(document_json, ''), embedding_ready,
 		       required_source_state, status, lease_until
 		FROM memory_vector_outbox
-		WHERE chat_session_id = ? AND (` + strings.Join(conditions, " OR ") + `)`
-	rows, err := s.conn.Query(ctx, query, args...)
-	if err != nil {
-		return nil, nil, err
+		WHERE chat_session_id = ? AND (%s)`
+	collect := func(query string, args ...any) error {
+		rows, err := s.conn.Query(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var row d1AdmissionOutboxRow
+			if err := rows.Scan(&row.id, &row.operationKey, &row.operation, &row.chatSessionID,
+				&row.sourceRevision, &row.documentID, &row.documentJSON, &row.embeddingReady,
+				&row.requiredSource, &row.status, &row.leaseUntil); err != nil {
+				return err
+			}
+			byKey[row.operationKey] = row
+			byDocument[row.documentID] = append(byDocument[row.documentID], row)
+		}
+		return rows.Err()
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var row d1AdmissionOutboxRow
-		if err := rows.Scan(&row.id, &row.operationKey, &row.operation, &row.chatSessionID,
-			&row.sourceRevision, &row.documentID, &row.documentJSON, &row.embeddingReady,
-			&row.requiredSource, &row.status, &row.leaseUntil); err != nil {
+	for _, keys := range d1BindChunks(operationKeys, chunkReserved) {
+		args := make([]any, 0, len(keys)+chunkReserved)
+		args = append(args, admission.ChatSessionID)
+		for _, key := range keys {
+			args = append(args, key)
+		}
+		query := fmt.Sprintf(statement, "operation_key IN ("+d1AdmissionPlaceholders(len(keys))+")")
+		if err := collect(query, args...); err != nil {
 			return nil, nil, err
 		}
-		byKey[row.operationKey] = row
-		byDocument[row.documentID] = append(byDocument[row.documentID], row)
 	}
-	return byKey, byDocument, rows.Err()
+	for _, ids := range d1BindChunks(documentIDs, chunkReserved) {
+		args := make([]any, 0, len(ids)+chunkReserved)
+		args = append(args, admission.ChatSessionID)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		query := fmt.Sprintf(statement, "document_id IN ("+d1AdmissionPlaceholders(len(ids))+")")
+		if err := collect(query, args...); err != nil {
+			return nil, nil, err
+		}
+	}
+	return byKey, byDocument, nil
 }
 
 // ---------------------------------------------------------------------------
