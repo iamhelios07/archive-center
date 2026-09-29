@@ -7,14 +7,10 @@ step. Follow it top to bottom.
 cannot be recovered, and one of them cannot be undone.
 
 - [Before you start](#before-you-start)
+- [First deployment — one command](#first-deployment--one-command)
 - [What you are building](#what-you-are-building)
 - [What survives a restart](#what-survives-a-restart)
-- [Step 1 — create the resources](#step-1--create-the-resources)
-- [Step 2 — apply the schema](#step-2--apply-the-schema)
-- [Step 3 — render the deploy config](#step-3--render-the-deploy-config)
-- [Step 4 — deploy the Worker](#step-4--deploy-the-worker)
-- [Step 5 — deploy the Container](#step-5--deploy-the-container)
-- [Step 6 — check that it came up](#step-6--check-that-it-came-up)
+- [Manual bridge resource reference](#manual-bridge-resource-reference)
 - [Optional: validate against real D1 and Vectorize first](#optional-validate-against-real-d1-and-vectorize-first)
 - [Operating it](#operating-it)
 - [Differences from the local runtime](#differences-from-the-local-runtime)
@@ -60,7 +56,51 @@ Do not point this at anything that already holds data for another project. The
 schema migrations add tables, and `/admin/database-reset` genuinely deletes every
 application row — see [Operating it](#operating-it).
 
+## First deployment — one command
+
+From a fresh clone, choose the exact vector width produced by the embedding model
+configured in RisuAI, then run:
+
+```bash
+node deploy/cloudflare/scripts/bootstrap-cloudflare.mjs --dimension=<N>
+```
+
+The bootstrap checks Node 22+, a running Docker-compatible engine and Wrangler;
+installs the tracked Worker dependencies; and begins an interactive Wrangler login
+only when no session exists. With multiple Cloudflare accounts, set
+`CLOUDFLARE_ACCOUNT_ID` in the invoking shell first. It creates a newly randomized
+D1 database, Vectorize index and Worker names for **this run**. It does not accept
+resource names, reuse resources, reset data, delete resources or infer an embedding
+dimension.
+
+It then applies all tracked D1 migrations, creates the `chat_session_id`, `tier` and
+`source_table` Vectorize metadata indexes, builds the Go image from the repository
+root, pushes it to Cloudflare Registry, renders ignored bridge/gateway configs,
+deploys both Workers, injects bridge and bearer secrets through stdin, and verifies
+unauthenticated rejection plus authenticated `/ready` before it prints the endpoint
+and bearer token exactly once. Save that terminal output in your password manager;
+the token cannot be recovered from this repository or the rendered configs.
+
+To check local prerequisites and renderer/template consistency without modifying a
+Cloudflare resource, run:
+
+```bash
+node deploy/cloudflare/scripts/bootstrap-cloudflare.mjs --check
+```
+
+A failure after remote creation is intentionally not rolled back: automatic cleanup
+could delete an existing resource after an operator retry. Resolve the error in the
+Cloudflare dashboard or CLI, retain the isolated resources for inspection, then make
+a new bootstrap run. Do not mix the generated deployment with the manual bridge
+commands below.
+
 ## What you are building
+
+The service topology is `RisuAI → gateway Worker → Go Container → bridge Worker →
+D1 / Vectorize`. The gateway verifies its bearer token before Container activation;
+the Container can reach storage only through the independently authenticated bridge.
+The legacy bridge-only diagram below explains the private half of that chain and is
+not a public deployment endpoint.
 
 ```
 RisuAI  ──HTTP──▶  Container (Go backend)
@@ -68,7 +108,7 @@ RisuAI  ──HTTP──▶  Container (Go backend)
                         │  versioned JSON envelopes over HTTP
                         ▼
                    Worker  ──┬──▶  D1        (canonical rows)
-                            └──▶  Vectorize  (rebuildable index)
+                             └──▶  Vectorize  (rebuildable index)
 ```
 
 The Worker is not optional and is not a shortcut. The Container holds a bridge URL
@@ -95,7 +135,12 @@ state loss look identical when nothing tells you which happened.
 | Operator jobs other than reset | process memory | **no** |
 | Diagnostic logs | container filesystem | **no** |
 
-## Step 1 — create the resources
+## Manual bridge resource reference
+
+> This section provisions only the private bridge resources. It does **not** create
+> the public gateway, Container image, gateway secrets or an RisuAI endpoint. Use
+> the one-command bootstrap above for a service deployment; keep this reference for
+> diagnosing individual D1/Vectorize operations.
 
 ### The embedding dimension
 
@@ -169,9 +214,9 @@ Recall filters on every query, so this is the difference between working recall
 and silently empty recall.
 
 ```bash
-npx wrangler vectorize create-metadata-index archive-center-vectors --propertyName=chat_session_id --type=string
-npx wrangler vectorize create-metadata-index archive-center-vectors --propertyName=tier --type=string
-npx wrangler vectorize create-metadata-index archive-center-vectors --propertyName=source_table --type=string
+npx wrangler vectorize create-metadata-index archive-center-vectors --property-name=chat_session_id --type=string
+npx wrangler vectorize create-metadata-index archive-center-vectors --property-name=tier --type=string
+npx wrangler vectorize create-metadata-index archive-center-vectors --property-name=source_table --type=string
 ```
 
 `chat_session_id` is the one that matters most: every recall query filters on it,

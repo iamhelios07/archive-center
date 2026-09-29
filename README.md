@@ -44,8 +44,8 @@ D1(SQLite), 벡터 엔진은 Vectorize이고, Container의 Go backend가 Worker�
 브리지로 거쳐 둘에 접근합니다. Container는 stateless이며 재시작되지 않고
 교체되므로, 재시작을 견뎌야 하는 상태는 전부 D1에 있습니다.
 
-- 배포 절차, 복구·migration runbook, 무엇이 영속되고 무엇이 아닌지,
-  원격 테스트 경계: [`deploy/cloudflare/README.md`](deploy/cloudflare/README.md)
+- fresh-clone one-command bootstrap, 배포·복구·migration runbook, 무엇이 영속되고
+  무엇이 아닌지, 원격 테스트 경계: [`deploy/cloudflare/README.md`](deploy/cloudflare/README.md)
 
 ## License
 
