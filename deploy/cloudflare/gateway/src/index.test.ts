@@ -8,7 +8,15 @@ vi.mock("@cloudflare/containers", () => ({
   getContainer: vi.fn(),
 }));
 
-import { authorizeGatewayRequest, gatewayConfigured, tokenMatches, type GatewayEnv } from "./index";
+import {
+  authorizeGatewayRequest,
+  corsPreflightResponse,
+  gatewayConfigured,
+  handleGatewayRequest,
+  tokenMatches,
+  withCorsHeaders,
+  type GatewayEnv,
+} from "./index";
 
 const configuredEnv = {
   ARCHIVE_CENTER: {} as DurableObjectNamespace,
@@ -53,5 +61,60 @@ describe("gateway authorization", () => {
     expect(await tokenMatches("client-secret", "client-secret")).toBe(true);
     expect(await tokenMatches("client-secret", "client-secret-suffix")).toBe(false);
     expect(accepted).toBeNull();
+  });
+});
+
+describe("gateway CORS", () => {
+  it("answers a preflight without requiring the credential the preflight cannot carry", async () => {
+    const preflight = new Request("https://gateway.invalid/sessions", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://risu.example",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type",
+      },
+    });
+    const forward = vi.fn();
+
+    const response = await handleGatewayRequest(preflight, configuredEnv, forward);
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+    expect(response.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it("makes a bearer rejection readable by a browser caller", async () => {
+    const unauthorized = new Request("https://gateway.invalid/ready", {
+      headers: { Origin: "https://risu.example" },
+    });
+
+    const response = await handleGatewayRequest(unauthorized, configuredEnv, vi.fn());
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+
+  it("keeps the Container's own origin header instead of duplicating it", async () => {
+    const containerResponse = new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    });
+
+    const response = withCorsHeaders(containerResponse);
+
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(response.headers.get("Vary")).toBe("Origin");
+    expect(response.status).toBe(200);
+  });
+
+  it("answers a preflight even when the Worker is not fully configured", () => {
+    // Configuration errors must stay diagnosable from a browser; a preflight that
+    // fails on a missing secret is indistinguishable from a broken deployment.
+    const preflight = corsPreflightResponse();
+
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 });
